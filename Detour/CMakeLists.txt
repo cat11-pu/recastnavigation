@@ -32,6 +32,7 @@ target_sources(Detour PRIVATE
     Source/DetourAlloc.cpp
     Source/DetourAssert.cpp
     Source/DetourCommon.cpp
+    Source/DetourLocalRebuild.cpp
     Source/DetourNavMesh.cpp
     Source/DetourNavMeshBuilder.cpp
     Source/DetourNavMeshQuery.cpp
