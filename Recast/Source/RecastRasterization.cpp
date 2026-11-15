@@ -21,6 +21,34 @@
 #include "RecastAlloc.h"
 #include "RecastAssert.h"
 
+namespace
+{
+inline bool rcFinite(float value)
+{
+	// NaN fails the self-equality test; subtracting a finite number from
+	// infinity yields the same infinity, which also fails the equality test.
+	return value == value && (value - value) == 0.0f;
+}
+
+inline bool rcFiniteVec3(const float* value)
+{
+	return rcFinite(value[0]) && rcFinite(value[1]) && rcFinite(value[2]);
+}
+
+/// Returns true when the three corners describe a triangle with measurable
+/// area.  Duplicate vertices or three collinear points produce a zero-area
+/// (degenerate) triangle.
+inline bool rcTriangleHasArea(const float* v0, const float* v1, const float* v2)
+{
+	float e0[3], e1[3], normal[3];
+	rcVsub(e0, v1, v0);
+	rcVsub(e1, v2, v0);
+	rcVcross(normal, e0, e1);
+	return rcFinite(normal[0]) && rcFinite(normal[1]) && rcFinite(normal[2]) &&
+	       (normal[0] != 0.0f || normal[1] != 0.0f || normal[2] != 0.0f);
+}
+} // anonymous namespace
+
 /// Check whether two bounding boxes overlap
 ///
 /// @param[in]	aMin	Min axis extents of bounding box A
@@ -337,9 +365,18 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
 	const int h = heightfield.height;
 	const float by = heightfieldBBMax[1] - heightfieldBBMin[1];
 
-	// Calculate the footprint of the triangle on the grid's z-axis
-	int z0 = (int)((triBBMin[2] - heightfieldBBMin[2]) * inverseCellSize);
-	int z1 = (int)((triBBMax[2] - heightfieldBBMin[2]) * inverseCellSize);
+	// Calculate the footprint of the triangle on the grid's z-axis as floats
+	// first.  A float-to-int conversion is undefined behaviour when the result
+	// does not fit in an int, so reject triangles whose grid footprint is that
+	// extreme rather than producing out-of-range cell indices (huge coordinates).
+	const float fz0 = (triBBMin[2] - heightfieldBBMin[2]) * inverseCellSize;
+	const float fz1 = (triBBMax[2] - heightfieldBBMin[2]) * inverseCellSize;
+	if (!rcFinite(fz0) || !rcFinite(fz1) || fz0 < -2147483000.0f || fz1 > 2147483000.0f)
+	{
+		return true;
+	}
+	int z0 = (int)fz0;
+	int z1 = (int)fz1;
 
 	// use -1 rather than 0 to cut the polygon properly at the start of the tile
 	z0 = rcClamp(z0, -1, h - 1);
@@ -469,6 +506,34 @@ bool rcRasterizeTriangle(rcContext* context,
 
 	rcScopedTimer timer(context, RC_TIMER_RASTERIZE_TRIANGLES);
 
+	context->clearError();
+
+	if (!v0 || !v1 || !v2)
+	{
+		return context->raiseError(RC_ERROR_NULL_ARGUMENT, "rcRasterizeTriangle: null vertex pointer");
+	}
+	if (heightfield.width <= 0 || heightfield.height <= 0 || !heightfield.spans)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangle: heightfield is not initialized");
+	}
+	if (!rcFiniteVec3(v0) || !rcFiniteVec3(v1) || !rcFiniteVec3(v2))
+	{
+		return context->raiseError(RC_ERROR_NON_FINITE_VERTEX, "rcRasterizeTriangle: vertex coordinate is NaN or infinity");
+	}
+	if (!rcTriangleHasArea(v0, v1, v2))
+	{
+		// Degenerate triangles (duplicate or collinear vertices) have no footprint
+		// and must never reach the polygon clipping code.  Report them but treat
+		// them as an empty, successful rasterization.
+		context->log(RC_LOG_WARNING, "rcRasterizeTriangle: degenerate triangle (zero area) rasterizes to nothing.");
+		return true;
+	}
+	if (flagMergeThreshold < 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT,
+		                           "rcRasterizeTriangle: flagMergeThreshold %d must be >= 0", flagMergeThreshold);
+	}
+
 	// Rasterize the single triangle.
 	const float inverseCellSize = 1.0f / heightfield.cs;
 	const float inverseCellHeight = 1.0f / heightfield.ch;
@@ -482,25 +547,82 @@ bool rcRasterizeTriangle(rcContext* context,
 }
 
 bool rcRasterizeTriangles(rcContext* context,
-                          const float* verts, const int /*nv*/,
+                          const float* verts, const int numVerts,
                           const int* tris, const unsigned char* triAreaIDs, const int numTris,
                           rcHeightfield& heightfield, const int flagMergeThreshold)
 {
 	rcAssert(context != NULL);
 
 	rcScopedTimer timer(context, RC_TIMER_RASTERIZE_TRIANGLES);
+
+	context->clearError();
+
+	if (!verts || !tris || !triAreaIDs)
+	{
+		return context->raiseError(RC_ERROR_NULL_ARGUMENT, "rcRasterizeTriangles: null input pointer");
+	}
+	if (numTris < 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: numTris %d must be >= 0", numTris);
+	}
+	if (numVerts <= 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: numVerts %d must be > 0", numVerts);
+	}
+	if (heightfield.width <= 0 || heightfield.height <= 0 || !heightfield.spans)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: heightfield is not initialized");
+	}
+	if (flagMergeThreshold < 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT,
+		                           "rcRasterizeTriangles: flagMergeThreshold %d must be >= 0", flagMergeThreshold);
+	}
 	
 	// Rasterize the triangles.
 	const float inverseCellSize = 1.0f / heightfield.cs;
 	const float inverseCellHeight = 1.0f / heightfield.ch;
 	for (int triIndex = 0; triIndex < numTris; ++triIndex)
 	{
-		const float* v0 = &verts[tris[triIndex * 3 + 0] * 3];
-		const float* v1 = &verts[tris[triIndex * 3 + 1] * 3];
-		const float* v2 = &verts[tris[triIndex * 3 + 2] * 3];
+		const int i0 = tris[triIndex * 3 + 0];
+		const int i1 = tris[triIndex * 3 + 1];
+		const int i2 = tris[triIndex * 3 + 2];
+		if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= numVerts || i1 >= numVerts || i2 >= numVerts)
+		{
+			const int indices[3] = {i0, i1, i2};
+			int badCorner = 0;
+			for (int corner = 0; corner < 3; ++corner)
+			{
+				if (indices[corner] < 0 || indices[corner] >= numVerts)
+				{
+					badCorner = corner;
+					break;
+				}
+			}
+			return context->raiseError(RC_ERROR_INVALID_TRIANGLE_INDEX,
+			                           "rcRasterizeTriangles: triangle %d vertex index %d (corner %d) is outside [0, %d)",
+			                           triIndex, indices[badCorner], badCorner, numVerts);
+		}
+		// Validate that every referenced coordinate is finite before the clipping
+		// code consumes it; NaN/infinity defeats the cell clamping and writes OOB.
+		const float* v0 = &verts[i0 * 3];
+		const float* v1 = &verts[i1 * 3];
+		const float* v2 = &verts[i2 * 3];
+		if (!rcFiniteVec3(v0) || !rcFiniteVec3(v1) || !rcFiniteVec3(v2))
+		{
+			return context->raiseError(RC_ERROR_NON_FINITE_VERTEX,
+			                           "rcRasterizeTriangles: triangle %d references a NaN or infinity vertex",
+			                           triIndex);
+		}
+		if (!rcTriangleHasArea(v0, v1, v2))
+		{
+			context->log(RC_LOG_WARNING, "rcRasterizeTriangles: triangle %d is degenerate (zero area), skipped.", triIndex);
+			continue;
+		}
 		if (!rasterizeTri(v0, v1, v2, triAreaIDs[triIndex], heightfield, heightfield.bmin, heightfield.bmax, heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold))
 		{
 			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+			context->raiseError(RC_ERROR_OUT_OF_MEMORY, "rcRasterizeTriangles: out of memory while rasterizing triangle %d", triIndex);
 			return false;
 		}
 	}
@@ -509,7 +631,7 @@ bool rcRasterizeTriangles(rcContext* context,
 }
 
 bool rcRasterizeTriangles(rcContext* context,
-                          const float* verts, const int /*nv*/,
+                          const float* verts, const int numVerts,
                           const unsigned short* tris, const unsigned char* triAreaIDs, const int numTris,
                           rcHeightfield& heightfield, const int flagMergeThreshold)
 {
@@ -517,17 +639,72 @@ bool rcRasterizeTriangles(rcContext* context,
 
 	rcScopedTimer timer(context, RC_TIMER_RASTERIZE_TRIANGLES);
 
+	context->clearError();
+
+	if (!verts || !tris || !triAreaIDs)
+	{
+		return context->raiseError(RC_ERROR_NULL_ARGUMENT, "rcRasterizeTriangles: null input pointer");
+	}
+	if (numTris < 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: numTris %d must be >= 0", numTris);
+	}
+	if (numVerts <= 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: numVerts %d must be > 0", numVerts);
+	}
+	if (heightfield.width <= 0 || heightfield.height <= 0 || !heightfield.spans)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: heightfield is not initialized");
+	}
+	if (flagMergeThreshold < 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT,
+		                           "rcRasterizeTriangles: flagMergeThreshold %d must be >= 0", flagMergeThreshold);
+	}
+
 	// Rasterize the triangles.
 	const float inverseCellSize = 1.0f / heightfield.cs;
 	const float inverseCellHeight = 1.0f / heightfield.ch;
 	for (int triIndex = 0; triIndex < numTris; ++triIndex)
 	{
-		const float* v0 = &verts[tris[triIndex * 3 + 0] * 3];
-		const float* v1 = &verts[tris[triIndex * 3 + 1] * 3];
-		const float* v2 = &verts[tris[triIndex * 3 + 2] * 3];
+		const int i0 = tris[triIndex * 3 + 0];
+		const int i1 = tris[triIndex * 3 + 1];
+		const int i2 = tris[triIndex * 3 + 2];
+		if (i0 >= numVerts || i1 >= numVerts || i2 >= numVerts)
+		{
+			const int indices[3] = {i0, i1, i2};
+			int badCorner = 0;
+			for (int corner = 0; corner < 3; ++corner)
+			{
+				if (indices[corner] >= numVerts)
+				{
+					badCorner = corner;
+					break;
+				}
+			}
+			return context->raiseError(RC_ERROR_INVALID_TRIANGLE_INDEX,
+			                           "rcRasterizeTriangles: triangle %d vertex index %d (corner %d) is outside [0, %d)",
+			                           triIndex, indices[badCorner], badCorner, numVerts);
+		}
+		const float* v0 = &verts[i0 * 3];
+		const float* v1 = &verts[i1 * 3];
+		const float* v2 = &verts[i2 * 3];
+		if (!rcFiniteVec3(v0) || !rcFiniteVec3(v1) || !rcFiniteVec3(v2))
+		{
+			return context->raiseError(RC_ERROR_NON_FINITE_VERTEX,
+			                           "rcRasterizeTriangles: triangle %d references a NaN or infinity vertex",
+			                           triIndex);
+		}
+		if (!rcTriangleHasArea(v0, v1, v2))
+		{
+			context->log(RC_LOG_WARNING, "rcRasterizeTriangles: triangle %d is degenerate (zero area), skipped.", triIndex);
+			continue;
+		}
 		if (!rasterizeTri(v0, v1, v2, triAreaIDs[triIndex], heightfield, heightfield.bmin, heightfield.bmax, heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold))
 		{
 			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+			context->raiseError(RC_ERROR_OUT_OF_MEMORY, "rcRasterizeTriangles: out of memory while rasterizing triangle %d", triIndex);
 			return false;
 		}
 	}
@@ -542,6 +719,26 @@ bool rcRasterizeTriangles(rcContext* context,
 	rcAssert(context != NULL);
 
 	rcScopedTimer timer(context, RC_TIMER_RASTERIZE_TRIANGLES);
+
+	context->clearError();
+
+	if (!verts || !triAreaIDs)
+	{
+		return context->raiseError(RC_ERROR_NULL_ARGUMENT, "rcRasterizeTriangles: null input pointer");
+	}
+	if (numTris < 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: numTris %d must be >= 0", numTris);
+	}
+	if (heightfield.width <= 0 || heightfield.height <= 0 || !heightfield.spans)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT, "rcRasterizeTriangles: heightfield is not initialized");
+	}
+	if (flagMergeThreshold < 0)
+	{
+		return context->raiseError(RC_ERROR_INVALID_COUNT,
+		                           "rcRasterizeTriangles: flagMergeThreshold %d must be >= 0", flagMergeThreshold);
+	}
 	
 	// Rasterize the triangles.
 	const float inverseCellSize = 1.0f / heightfield.cs;
@@ -551,9 +748,21 @@ bool rcRasterizeTriangles(rcContext* context,
 		const float* v0 = &verts[(triIndex * 3 + 0) * 3];
 		const float* v1 = &verts[(triIndex * 3 + 1) * 3];
 		const float* v2 = &verts[(triIndex * 3 + 2) * 3];
+		if (!rcFiniteVec3(v0) || !rcFiniteVec3(v1) || !rcFiniteVec3(v2))
+		{
+			return context->raiseError(RC_ERROR_NON_FINITE_VERTEX,
+			                           "rcRasterizeTriangles: triangle %d references a NaN or infinity vertex",
+			                           triIndex);
+		}
+		if (!rcTriangleHasArea(v0, v1, v2))
+		{
+			context->log(RC_LOG_WARNING, "rcRasterizeTriangles: triangle %d is degenerate (zero area), skipped.", triIndex);
+			continue;
+		}
 		if (!rasterizeTri(v0, v1, v2, triAreaIDs[triIndex], heightfield, heightfield.bmin, heightfield.bmax, heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold))
 		{
 			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+			context->raiseError(RC_ERROR_OUT_OF_MEMORY, "rcRasterizeTriangles: out of memory while rasterizing triangle %d", triIndex);
 			return false;
 		}
 	}

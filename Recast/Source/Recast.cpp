@@ -48,6 +48,50 @@ void rcDelete(T* ptr)
 		rcFree((void*)ptr);
 	}
 }
+
+/// Upper bound on the number of heightfield columns Recast is willing to
+/// allocate.  Keeps every width*height product safely inside an int and limits
+/// the span pointer array to ~16 MiB.
+const int RC_MAX_HEIGHTFIELD_CELLS = 1 << 20;
+
+inline bool rcFinite(float value)
+{
+	// NaN fails the self-equality test; subtracting a finite number from
+	// infinity yields the same infinity, which also fails the equality test.
+	return value == value && (value - value) == 0.0f;
+}
+
+inline bool rcFiniteVec3(const float* value)
+{
+	return rcFinite(value[0]) && rcFinite(value[1]) && rcFinite(value[2]);
+}
+
+/// Validates the parameters of a heightfield allocation without touching the
+/// context, so it can be shared by the null-context and normal code paths.
+inline bool rcValidHeightfieldParams(int sizeX, int sizeZ,
+                                     const float* minBounds, const float* maxBounds,
+                                     float cellSize, float cellHeight)
+{
+	if (sizeX <= 0 || sizeZ <= 0 || !minBounds || !maxBounds)
+	{
+		return false;
+	}
+	if (!rcFinite(cellSize) || cellSize <= 0.0f || !rcFinite(cellHeight) || cellHeight <= 0.0f)
+	{
+		return false;
+	}
+	if (!rcFiniteVec3(minBounds) || !rcFiniteVec3(maxBounds) ||
+	    maxBounds[0] < minBounds[0] || maxBounds[1] < minBounds[1] || maxBounds[2] < minBounds[2])
+	{
+		return false;
+	}
+	if (sizeX > RC_MAX_HEIGHTFIELD_CELLS || sizeZ > RC_MAX_HEIGHTFIELD_CELLS ||
+	    (long long)sizeX * (long long)sizeZ > (long long)RC_MAX_HEIGHTFIELD_CELLS)
+	{
+		return false;
+	}
+	return true;
+}
 } // anonymous namespace
 
 float rcSqrt(float x)
@@ -76,6 +120,25 @@ void rcContext::log(const rcLogCategory category, const char* format, ...)
 	}
 	va_end(argList);
 	doLog(category, msg, len);
+}
+
+bool rcContext::raiseError(rcErrorCode code, const char* location, ...)
+{
+	m_lastErrorCode = code;
+
+	va_list argList;
+	va_start(argList, location);
+	vsnprintf(m_lastErrorLocation, RC_MAX_ERROR_LOCATION, location, argList);
+	va_end(argList);
+	m_lastErrorLocation[RC_MAX_ERROR_LOCATION - 1] = '\0';
+
+	// Route the same information through the existing logging facility so that
+	// implementations overriding doLog() keep working unchanged.
+	if (m_logEnabled)
+	{
+		doLog(RC_LOG_ERROR, m_lastErrorLocation, (int)strlen(m_lastErrorLocation));
+	}
+	return false;
 }
 
 void rcContext::doResetLog()
@@ -299,15 +362,73 @@ void rcCalcBounds(const float* verts, int numVerts, float* minBounds, float* max
 
 void rcCalcGridSize(const float* minBounds, const float* maxBounds, const float cellSize, int* sizeX, int* sizeZ)
 {
-	*sizeX = (int)((maxBounds[0] - minBounds[0]) / cellSize + 0.5f);
-	*sizeZ = (int)((maxBounds[2] - minBounds[2]) / cellSize + 0.5f);
+	if (!sizeX || !sizeZ)
+	{
+		return;
+	}
+	*sizeX = 0;
+	*sizeZ = 0;
+
+	if (!minBounds || !maxBounds || !rcFinite(cellSize) || cellSize <= 0.0f ||
+	    !rcFiniteVec3(minBounds) || !rcFiniteVec3(maxBounds) ||
+	    maxBounds[0] < minBounds[0] || maxBounds[2] < minBounds[2])
+	{
+		return;
+	}
+
+	const float spanX = (maxBounds[0] - minBounds[0]) / cellSize + 0.5f;
+	const float spanZ = (maxBounds[2] - minBounds[2]) / cellSize + 0.5f;
+
+	// Clamp instead of relying on a float-to-int conversion, which is undefined
+	// behaviour when the float does not fit in an int (e.g. world coordinates
+	// in the billions with a centimetre cell size).
+	*sizeX = (spanX >= (float)RC_MAX_HEIGHTFIELD_CELLS) ? RC_MAX_HEIGHTFIELD_CELLS : (int)spanX;
+	*sizeZ = (spanZ >= (float)RC_MAX_HEIGHTFIELD_CELLS) ? RC_MAX_HEIGHTFIELD_CELLS : (int)spanZ;
 }
 
 bool rcCreateHeightfield(rcContext* context, rcHeightfield& heightfield, int sizeX, int sizeZ,
                          const float* minBounds, const float* maxBounds,
                          float cellSize, float cellHeight)
 {
-	rcIgnoreUnused(context);
+	// A null context is accepted for backwards compatibility; validation still
+	// runs on that path, it simply cannot record a detailed error message.
+	if (!rcValidHeightfieldParams(sizeX, sizeZ, minBounds, maxBounds, cellSize, cellHeight))
+	{
+		if (context)
+		{
+			context->clearError();
+			if (!minBounds || !maxBounds)
+			{
+				return context->raiseError(RC_ERROR_NULL_ARGUMENT, "rcCreateHeightfield: null bounds pointer");
+			}
+			if (sizeX <= 0 || sizeZ <= 0)
+			{
+				return context->raiseError(RC_ERROR_INVALID_COUNT,
+				                           "rcCreateHeightfield: empty sub-grid (sizeX=%d, sizeZ=%d)", sizeX, sizeZ);
+			}
+			if (!rcFinite(cellSize) || cellSize <= 0.0f || !rcFinite(cellHeight) || cellHeight <= 0.0f)
+			{
+				return context->raiseError(RC_ERROR_INVALID_CELL_SIZE,
+				                           "rcCreateHeightfield: cellSize=%g cellHeight=%g must be finite and positive",
+				                           cellSize, cellHeight);
+			}
+			if (!rcFiniteVec3(minBounds) || !rcFiniteVec3(maxBounds) ||
+			    maxBounds[0] < minBounds[0] || maxBounds[1] < minBounds[1] || maxBounds[2] < minBounds[2])
+			{
+				return context->raiseError(RC_ERROR_INVALID_BOUNDS,
+				                           "rcCreateHeightfield: malformed or non-finite bounding box");
+			}
+			return context->raiseError(RC_ERROR_GRID_TOO_LARGE,
+			                           "rcCreateHeightfield: grid %d x %d exceeds the %d cell limit",
+			                           sizeX, sizeZ, RC_MAX_HEIGHTFIELD_CELLS);
+		}
+		return false;
+	}
+
+	if (context)
+	{
+		context->clearError();
+	}
 
 	heightfield.width = sizeX;
 	heightfield.height = sizeZ;
@@ -318,6 +439,11 @@ bool rcCreateHeightfield(rcContext* context, rcHeightfield& heightfield, int siz
 	heightfield.spans = (rcSpan**)rcAlloc(sizeof(rcSpan*) * heightfield.width * heightfield.height, RC_ALLOC_PERM);
 	if (!heightfield.spans)
 	{
+		if (context)
+		{
+			context->raiseError(RC_ERROR_OUT_OF_MEMORY, "rcCreateHeightfield: failed to allocate %d span columns",
+			                    heightfield.width * heightfield.height);
+		}
 		return false;
 	}
 	memset(heightfield.spans, 0, sizeof(rcSpan*) * heightfield.width * heightfield.height);
@@ -338,8 +464,44 @@ void rcMarkWalkableTriangles(rcContext* context, const float walkableSlopeAngle,
                              const int* tris, const int numTris,
                              unsigned char* triAreaIDs)
 {
-	rcIgnoreUnused(context);
-	rcIgnoreUnused(numVerts);
+	if (context)
+	{
+		context->clearError();
+	}
+	if (!verts || !tris || !triAreaIDs)
+	{
+		if (context)
+		{
+			context->raiseError(RC_ERROR_NULL_ARGUMENT, "rcMarkWalkableTriangles: null input pointer");
+		}
+		return;
+	}
+	if (numVerts <= 0 || numTris < 0)
+	{
+		if (context)
+		{
+			context->raiseError(RC_ERROR_INVALID_COUNT,
+			                    "rcMarkWalkableTriangles: numVerts=%d numTris=%d", numVerts, numTris);
+		}
+		return;
+	}
+	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	{
+		for (int corner = 0; corner < 3; ++corner)
+		{
+			const int vertexIndex = tris[triIndex * 3 + corner];
+			if (vertexIndex < 0 || vertexIndex >= numVerts)
+			{
+				if (context)
+				{
+					context->raiseError(RC_ERROR_INVALID_TRIANGLE_INDEX,
+					                    "rcMarkWalkableTriangles: triangle %d vertex index %d is outside [0, %d)",
+					                    triIndex, vertexIndex, numVerts);
+				}
+				return;
+			}
+		}
+	}
 
 	const float walkableThr = cosf(walkableSlopeAngle / 180.0f * RC_PI);
 
@@ -362,8 +524,44 @@ void rcClearUnwalkableTriangles(rcContext* context, const float walkableSlopeAng
                                 const int* tris, int numTris,
                                 unsigned char* triAreaIDs)
 {
-	rcIgnoreUnused(context);
-	rcIgnoreUnused(numVerts);
+	if (context)
+	{
+		context->clearError();
+	}
+	if (!verts || !tris || !triAreaIDs)
+	{
+		if (context)
+		{
+			context->raiseError(RC_ERROR_NULL_ARGUMENT, "rcClearUnwalkableTriangles: null input pointer");
+		}
+		return;
+	}
+	if (numVerts <= 0 || numTris < 0)
+	{
+		if (context)
+		{
+			context->raiseError(RC_ERROR_INVALID_COUNT,
+			                    "rcClearUnwalkableTriangles: numVerts=%d numTris=%d", numVerts, numTris);
+		}
+		return;
+	}
+	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	{
+		for (int corner = 0; corner < 3; ++corner)
+		{
+			const int vertexIndex = tris[triIndex * 3 + corner];
+			if (vertexIndex < 0 || vertexIndex >= numVerts)
+			{
+				if (context)
+				{
+					context->raiseError(RC_ERROR_INVALID_TRIANGLE_INDEX,
+					                    "rcClearUnwalkableTriangles: triangle %d vertex index %d is outside [0, %d)",
+					                    triIndex, vertexIndex, numVerts);
+				}
+				return;
+			}
+		}
+	}
 
 	// The minimum Y value for a face normal of a triangle with a walkable slope.
 	const float walkableLimitY = cosf(walkableSlopeAngle / 180.0f * RC_PI);

@@ -1,0 +1,13 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/cat/gsb/uid3840/buildasan2/cmake_install.cmake",
+		"/home/cat/gsb/uid3840/buildasan2/DebugUtils/cmake_install.cmake",
+		"/home/cat/gsb/uid3840/buildasan2/Detour/cmake_install.cmake",
+		"/home/cat/gsb/uid3840/buildasan2/DetourCrowd/cmake_install.cmake",
+		"/home/cat/gsb/uid3840/buildasan2/DetourTileCache/cmake_install.cmake",
+		"/home/cat/gsb/uid3840/buildasan2/Recast/cmake_install.cmake",
+		"/home/cat/gsb/uid3840/buildasan2/Tests/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

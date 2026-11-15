@@ -34,6 +34,42 @@ enum rcLogCategory
 	RC_LOG_ERROR			///< An error log entry.
 };
 
+/// Error codes reported by the input validation added to the public Recast
+/// build entry points.
+///
+/// The most recent error raised on an #rcContext can be queried with
+/// rcContext::getLastError() / rcContext::getLastErrorLocation().  The context
+/// is reset with rcContext::clearError().  Functions keep their historical
+/// boolean return value: they return @c false when an error is recorded.
+/// @ingroup recast
+enum rcErrorCode
+{
+	/// No error has been recorded.
+	RC_ERROR_NONE = 0,
+	/// A required pointer argument was null.
+	RC_ERROR_NULL_ARGUMENT,
+	/// A count argument (vertices, triangles, grid size, ...) was negative or zero.
+	RC_ERROR_INVALID_COUNT,
+	/// A cell size or cell height argument was zero, negative or not finite.
+	RC_ERROR_INVALID_CELL_SIZE,
+	/// A bounding box or pair of extents was malformed (e.g. min > max or not finite).
+	RC_ERROR_INVALID_BOUNDS,
+	/// A triangle index was negative or referred to a vertex that does not exist.
+	RC_ERROR_INVALID_TRIANGLE_INDEX,
+	/// A vertex coordinate was NaN or infinity.
+	RC_ERROR_NON_FINITE_VERTEX,
+	/// A triangle was degenerate (duplicate or collinear vertices, zero area).
+	RC_ERROR_DEGENERATE_TRIANGLE,
+	/// The requested grid would require more cells or memory than Recast can address.
+	RC_ERROR_GRID_TOO_LARGE,
+	/// A memory allocation failed.
+	RC_ERROR_OUT_OF_MEMORY
+};
+
+/// Maximum number of characters (including the terminating zero) stored in an
+/// #rcContext error location string.
+static const int RC_MAX_ERROR_LOCATION = 128;
+
 /// Recast performance timer categories.
 /// @see rcContext
 enum rcTimerLabel
@@ -116,7 +152,13 @@ class rcContext
 public:
 	/// Constructor.
 	///  @param[in]		state	TRUE if the logging and performance timers should be enabled.  [Default: true]
-	inline rcContext(bool state = true) : m_logEnabled(state), m_timerEnabled(state) {}
+	inline rcContext(bool state = true)
+		: m_logEnabled(state)
+		, m_timerEnabled(state)
+		, m_lastErrorCode(RC_ERROR_NONE)
+	{
+		m_lastErrorLocation[0] = '\0';
+	}
 	virtual ~rcContext() {}
 
 	/// Enables or disables logging.
@@ -125,6 +167,36 @@ public:
 
 	/// Clears all log entries.
 	inline void resetLog() { if (m_logEnabled) doResetLog(); }
+
+	/// Clears the last error recorded on this context.
+	/// @see getLastError, getLastErrorLocation
+	inline void clearError()
+	{
+		m_lastErrorCode = RC_ERROR_NONE;
+		m_lastErrorLocation[0] = '\0';
+	}
+
+	/// Returns the code of the most recent error, or #RC_ERROR_NONE if no error
+	/// has been raised since the last call to clearError().
+	/// @see getLastErrorLocation, clearError
+	inline rcErrorCode getLastError() const { return m_lastErrorCode; }
+
+	/// Returns the human-readable location of the most recent error.
+	///
+	/// The string identifies the API call and, when applicable, the offending
+	/// zero-based triangle index and/or vertex index, for example
+	/// <c>"rcRasterizeTriangles: triangle 7 vertex index 2"</c>.
+	/// Returns an empty string when there is no error.
+	/// @see getLastError, clearError
+	inline const char* getLastErrorLocation() const { return m_lastErrorLocation; }
+
+	/// Records an error, logs it and stores a formatted location string.
+	///
+	/// @param[in]		code		The error code.
+	/// @param[in]		location	printf-style description of where the error occurred.
+	/// @returns Always @c false, so callers can write
+	/// <c>return context->raiseError(RC_ERROR_..., "...");</c>.
+	bool raiseError(rcErrorCode code, const char* location, ...);
 
 	/// Logs a message.
 	///
@@ -189,6 +261,12 @@ protected:
 
 	/// True if the performance timers are enabled.
 	bool m_timerEnabled;
+
+	/// Code of the most recent validation error.
+	rcErrorCode m_lastErrorCode;
+
+	/// Formatted location of the most recent validation error.
+	char m_lastErrorLocation[RC_MAX_ERROR_LOCATION];
 };
 
 /// A helper to first start a timer and then stop it when this helper goes out of scope.

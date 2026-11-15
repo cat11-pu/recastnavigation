@@ -559,7 +559,6 @@ TEST_CASE("rcRasterizeTriangle", "[recast][rasterization]")
 
 	SECTION("Degenerate triangles rasterize to nothing")
 	{
-		SKIP("Currently Recast rasterizes degenerate triangles as if they were a line or point of non-zero volume.");
 		{ // Co-linear points
 			float v0[] = {1.0f, 0.0f, 0.5f};
 			float v1[] = {2.0f, 0.0f, 0.5f};
