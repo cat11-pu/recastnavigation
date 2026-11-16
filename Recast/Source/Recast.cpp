@@ -103,6 +103,8 @@ rcHeightfield::rcHeightfield()
 , spans()
 , pools()
 , freelist()
+, columnMask()
+, columnMaskWordCount()
 {
 }
 
@@ -110,6 +112,7 @@ rcHeightfield::~rcHeightfield()
 {
 	// Delete span array.
 	rcFree(spans);
+	rcFree(columnMask);
 	// Delete span pools.
 	while (pools)
 	{
@@ -146,6 +149,8 @@ rcCompactHeightfield::rcCompactHeightfield()
 , spans()
 , dist()
 , areas()
+, activeCells()
+, activeCellCount()
 {
 }
 
@@ -155,6 +160,7 @@ rcCompactHeightfield::~rcCompactHeightfield()
 	rcFree(spans);
 	rcFree(dist);
 	rcFree(areas);
+	rcFree(activeCells);
 }
 
 rcHeightfieldLayerSet* rcAllocHeightfieldLayerSet()
@@ -321,6 +327,13 @@ bool rcCreateHeightfield(rcContext* context, rcHeightfield& heightfield, int siz
 		return false;
 	}
 	memset(heightfield.spans, 0, sizeof(rcSpan*) * heightfield.width * heightfield.height);
+	heightfield.columnMaskWordCount = (heightfield.width * heightfield.height + 31) / 32;
+	heightfield.columnMask = (unsigned int*)rcAlloc(sizeof(unsigned int) * heightfield.columnMaskWordCount, RC_ALLOC_PERM);
+	if (!heightfield.columnMask)
+	{
+		return false;
+	}
+	memset(heightfield.columnMask, 0, sizeof(unsigned int) * heightfield.columnMaskWordCount);
 	return true;
 }
 
@@ -387,6 +400,28 @@ int rcGetHeightFieldSpanCount(rcContext* context, const rcHeightfield& heightfie
 
 	const int numCols = heightfield.width * heightfield.height;
 	int spanCount = 0;
+	if (heightfield.columnMask)
+	{
+		for (int wordIndex = 0; wordIndex < heightfield.columnMaskWordCount; ++wordIndex)
+		{
+			unsigned int bits = heightfield.columnMask[wordIndex];
+			for (int bit = 0; bit < 32 && bits; ++bit)
+			{
+				const unsigned int bitMask = 1u << bit;
+				if ((bits & bitMask) != 0)
+				{
+					const int columnIndex = wordIndex * 32 + bit;
+					for (rcSpan* span = heightfield.spans[columnIndex]; span != NULL; span = span->next)
+					{
+						if (span->area != RC_NULL_AREA)
+							++spanCount;
+					}
+					bits &= ~bitMask;
+				}
+			}
+		}
+		return spanCount;
+	}
 	for (int columnIndex = 0; columnIndex < numCols; ++columnIndex)
 	{
 		for (rcSpan* span = heightfield.spans[columnIndex]; span != NULL; span = span->next)
@@ -409,12 +444,64 @@ bool rcBuildCompactHeightfield(rcContext* context, const int walkableHeight, con
 
 	const int xSize = heightfield.width;
 	const int zSize = heightfield.height;
-	const int spanCount = rcGetHeightFieldSpanCount(context, heightfield);
+	int spanCount = 0;
+	const int numColumns = xSize * zSize;
+	rcTempVector<int> activeColumns;
+	if (heightfield.columnMask)
+	{
+		for (const rcSpanPool* pool = heightfield.pools; pool != NULL; pool = pool->next)
+			spanCount += RC_SPANS_PER_POOL;
+		for (int wordIndex = 0; wordIndex < heightfield.columnMaskWordCount; ++wordIndex)
+		{
+			unsigned int bits = heightfield.columnMask[wordIndex];
+			for (int bit = 0; bit < 32 && bits; ++bit)
+			{
+				const unsigned int bitMask = 1u << bit;
+				if ((bits & bitMask) != 0)
+				{
+					const int columnIndex = wordIndex * 32 + bit;
+					activeColumns.push_back(columnIndex);
+					bits &= ~bitMask;
+				}
+			}
+		}
+		if (spanCount == 0)
+			spanCount = rcGetHeightFieldSpanCount(context, heightfield);
+		if (activeColumns.size() == 0 && spanCount > 0)
+		{
+			for (int columnIndex = 0; columnIndex < numColumns; ++columnIndex)
+			{
+				for (const rcSpan* span = heightfield.spans[columnIndex]; span != NULL; span = span->next)
+				{
+					if (span->area != RC_NULL_AREA)
+					{
+						activeColumns.push_back(columnIndex);
+						break;
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		spanCount = rcGetHeightFieldSpanCount(context, heightfield);
+		for (int columnIndex = 0; columnIndex < numColumns; ++columnIndex)
+		{
+			bool hasWalkableSpan = false;
+			for (const rcSpan* span = heightfield.spans[columnIndex]; span != NULL; span = span->next)
+			{
+				if (span->area != RC_NULL_AREA)
+					hasWalkableSpan = true;
+			}
+			if (hasWalkableSpan)
+				activeColumns.push_back(columnIndex);
+		}
+	}
 
 	// Fill in header.
 	compactHeightfield.width = xSize;
 	compactHeightfield.height = zSize;
-	compactHeightfield.spanCount = spanCount;
+	compactHeightfield.spanCount = 0;
 	compactHeightfield.walkableHeight = walkableHeight;
 	compactHeightfield.walkableClimb = walkableClimb;
 	compactHeightfield.maxRegions = 0;
@@ -430,35 +517,31 @@ bool rcBuildCompactHeightfield(rcContext* context, const int walkableHeight, con
 		return false;
 	}
 	memset(compactHeightfield.cells, 0, sizeof(rcCompactCell) * xSize * zSize);
-	compactHeightfield.spans = (rcCompactSpan*)rcAlloc(sizeof(rcCompactSpan) * spanCount, RC_ALLOC_PERM);
-	if (!compactHeightfield.spans)
+	compactHeightfield.spans = spanCount > 0
+		? (rcCompactSpan*)rcAlloc(sizeof(rcCompactSpan) * spanCount, RC_ALLOC_PERM)
+		: NULL;
+	if (spanCount > 0 && !compactHeightfield.spans)
 	{
 		context->log(RC_LOG_ERROR, "rcBuildCompactHeightfield: Out of memory 'chf.spans' (%d)", spanCount);
 		return false;
 	}
-	memset(compactHeightfield.spans, 0, sizeof(rcCompactSpan) * spanCount);
-	compactHeightfield.areas = (unsigned char*)rcAlloc(sizeof(unsigned char) * spanCount, RC_ALLOC_PERM);
-	if (!compactHeightfield.areas)
+	compactHeightfield.areas = spanCount > 0
+		? (unsigned char*)rcAlloc(sizeof(unsigned char) * spanCount, RC_ALLOC_PERM)
+		: NULL;
+	if (spanCount > 0 && !compactHeightfield.areas)
 	{
 		context->log(RC_LOG_ERROR, "rcBuildCompactHeightfield: Out of memory 'chf.areas' (%d)", spanCount);
 		return false;
 	}
-	memset(compactHeightfield.areas, RC_NULL_AREA, sizeof(unsigned char) * spanCount);
 
 	const int MAX_HEIGHT = 0xffff;
 
 	// Fill in cells and spans.
 	int currentCellIndex = 0;
-	const int numColumns = xSize * zSize;
-	for (int columnIndex = 0; columnIndex < numColumns; ++columnIndex)
+	for (int activeIndex = 0; activeIndex < activeColumns.size(); ++activeIndex)
 	{
+		const int columnIndex = activeColumns[activeIndex];
 		const rcSpan* span = heightfield.spans[columnIndex];
-			
-		// If there are no spans at this cell, just leave the data to index=0, count=0.
-		if (span == NULL)
-		{
-			continue;
-		}
 			
 		rcCompactCell& cell = compactHeightfield.cells[columnIndex];
 		cell.index = currentCellIndex;
@@ -472,10 +555,30 @@ bool rcBuildCompactHeightfield(rcContext* context, const int walkableHeight, con
 				const int top = span->next ? (int)span->next->smin : MAX_HEIGHT;
 				compactHeightfield.spans[currentCellIndex].y = (unsigned short)rcClamp(bot, 0, 0xffff);
 				compactHeightfield.spans[currentCellIndex].h = (unsigned char)rcClamp(top - bot, 0, 0xff);
+				compactHeightfield.spans[currentCellIndex].reg = 0;
 				compactHeightfield.areas[currentCellIndex] = span->area;
 				currentCellIndex++;
 				cell.count++;
 			}
+		}
+	}
+	compactHeightfield.spanCount = currentCellIndex;
+
+	const int maxActiveCellCount = static_cast<int>(activeColumns.size());
+	if (maxActiveCellCount > 0)
+	{
+		compactHeightfield.activeCells = (int*)rcAlloc(sizeof(int) * maxActiveCellCount, RC_ALLOC_PERM);
+		if (!compactHeightfield.activeCells)
+		{
+			context->log(RC_LOG_ERROR, "rcBuildCompactHeightfield: Out of memory 'chf.activeCells' (%d)",
+						 maxActiveCellCount);
+			return false;
+		}
+		for (int i = 0; i < maxActiveCellCount; ++i)
+		{
+			const int columnIndex = activeColumns[i];
+			if (compactHeightfield.cells[columnIndex].count != 0)
+				compactHeightfield.activeCells[compactHeightfield.activeCellCount++] = columnIndex;
 		}
 	}
 	
@@ -483,13 +586,15 @@ bool rcBuildCompactHeightfield(rcContext* context, const int walkableHeight, con
 	const int MAX_LAYERS = RC_NOT_CONNECTED - 1;
 	int maxLayerIndex = 0;
 	const int zStride = xSize; // for readability
-	for (int z = 0; z < zSize; ++z)
+	for (int ci = 0; ci < compactHeightfield.activeCellCount; ++ci)
 	{
-		for (int x = 0; x < xSize; ++x)
+		const int columnIndex = compactHeightfield.activeCells[ci];
+		const int z = columnIndex / zStride;
+		const int x = columnIndex - z * zStride;
 		{
-			const rcCompactCell& cell = compactHeightfield.cells[x + z * zStride];
+			const rcCompactCell& cell = compactHeightfield.cells[columnIndex];
 			for (int i = (int)cell.index, ni = (int)(cell.index + cell.count); i < ni; ++i)
-			{
+		{
 				rcCompactSpan& span = compactHeightfield.spans[i];
 
 				for (int dir = 0; dir < 4; ++dir)
@@ -531,7 +636,6 @@ bool rcBuildCompactHeightfield(rcContext* context, const int walkableHeight, con
 			}
 		}
 	}
-
 	if (maxLayerIndex > MAX_LAYERS)
 	{
 		context->log(RC_LOG_ERROR, "rcBuildCompactHeightfield: Heightfield has too many layers %d (max: %d)",

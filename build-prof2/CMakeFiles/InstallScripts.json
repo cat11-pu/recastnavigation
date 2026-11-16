@@ -1,0 +1,12 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/cat/gsb/uid3839/build-prof2/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-prof2/DebugUtils/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-prof2/Detour/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-prof2/DetourCrowd/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-prof2/DetourTileCache/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-prof2/Recast/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

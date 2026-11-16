@@ -818,7 +818,6 @@ bool rcBuildContours(rcContext* ctx, const rcCompactHeightfield& chf,
 	rcAssert(ctx);
 	
 	const int w = chf.width;
-	const int h = chf.height;
 	const int borderSize = chf.borderSize;
 	
 	rcScopedTimer timer(ctx, RC_TIMER_BUILD_CONTOURS);
@@ -853,13 +852,17 @@ bool rcBuildContours(rcContext* ctx, const rcCompactHeightfield& chf,
 		ctx->log(RC_LOG_ERROR, "rcBuildContours: Out of memory 'flags' (%d).", chf.spanCount);
 		return false;
 	}
+	const int activeCellCount = chf.activeCellCount;
+	const int* activeCells = chf.activeCells;
 	
 	ctx->startTimer(RC_TIMER_BUILD_CONTOURS_TRACE);
 	
 	// Mark boundaries.
-	for (int y = 0; y < h; ++y)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < w; ++x)
+		const int columnIndex = activeCells[ci];
+		const int y = columnIndex / w;
+		const int x = columnIndex - y * w;
 		{
 			const rcCompactCell& c = chf.cells[x+y*w];
 			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
@@ -894,9 +897,11 @@ bool rcBuildContours(rcContext* ctx, const rcCompactHeightfield& chf,
 	rcTempVector<int> verts(256);
 	rcTempVector<int> simplified(64);
 	
-	for (int y = 0; y < h; ++y)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < w; ++x)
+		const int columnIndex = activeCells[ci];
+		const int y = columnIndex / w;
+		const int x = columnIndex - y * w;
 		{
 			const rcCompactCell& c = chf.cells[x+y*w];
 			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)

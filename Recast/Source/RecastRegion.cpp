@@ -34,150 +34,155 @@ struct LevelStackEntry
 	int y;
 	int index;
 };
+
+inline void getCellCoords(const int index, const int width, int& x, int& y)
+{
+	y = index / width;
+	x = index - y * width;
+}
 }  // namespace
 
-static void calculateDistanceField(rcCompactHeightfield& chf, unsigned short* src, unsigned short& maxDist)
+static void calculateDistanceField(rcCompactHeightfield& chf, unsigned short* src, unsigned short& maxDist,
+								   const int* activeCells, const int activeCellCount)
 {
 	const int w = chf.width;
-	const int h = chf.height;
 	
 	// Init distance and points.
-	for (int i = 0; i < chf.spanCount; ++i)
-		src[i] = 0xffff;
+	memset(src, 0xff, sizeof(unsigned short) * chf.spanCount);
 	
 	// Mark boundary cells.
-	for (int y = 0; y < h; ++y)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < w; ++x)
+		const int columnIndex = activeCells[ci];
+		int x, y;
+		getCellCoords(columnIndex, w, x, y);
+		const rcCompactCell& c = chf.cells[columnIndex];
+		for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
 		{
-			const rcCompactCell& c = chf.cells[x+y*w];
-			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
+			const rcCompactSpan& s = chf.spans[i];
+			const unsigned char area = chf.areas[i];
+
+			int nc = 0;
+			for (int dir = 0; dir < 4; ++dir)
 			{
-				const rcCompactSpan& s = chf.spans[i];
-				const unsigned char area = chf.areas[i];
-				
-				int nc = 0;
-				for (int dir = 0; dir < 4; ++dir)
+				if (rcGetCon(s, dir) != RC_NOT_CONNECTED)
 				{
-					if (rcGetCon(s, dir) != RC_NOT_CONNECTED)
-					{
-						const int ax = x + rcGetDirOffsetX(dir);
-						const int ay = y + rcGetDirOffsetY(dir);
-						const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, dir);
-						if (area == chf.areas[ai])
-							nc++;
-					}
+					const int ax = x + rcGetDirOffsetX(dir);
+					const int ay = y + rcGetDirOffsetY(dir);
+					const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, dir);
+					if (area == chf.areas[ai])
+						nc++;
 				}
-				if (nc != 4)
-					src[i] = 0;
 			}
+			if (nc != 4)
+				src[i] = 0;
 		}
 	}
 	
 			
 	// Pass 1
-	for (int y = 0; y < h; ++y)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < w; ++x)
+		const int columnIndex = activeCells[ci];
+		int x, y;
+		getCellCoords(columnIndex, w, x, y);
+		const rcCompactCell& c = chf.cells[columnIndex];
+		for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
 		{
-			const rcCompactCell& c = chf.cells[x+y*w];
-			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
+			const rcCompactSpan& s = chf.spans[i];
+
+			if (rcGetCon(s, 0) != RC_NOT_CONNECTED)
 			{
-				const rcCompactSpan& s = chf.spans[i];
-				
-				if (rcGetCon(s, 0) != RC_NOT_CONNECTED)
+				// (-1,0)
+				const int ax = x + rcGetDirOffsetX(0);
+				const int ay = y + rcGetDirOffsetY(0);
+				const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 0);
+				const rcCompactSpan& as = chf.spans[ai];
+				if (src[ai]+2 < src[i])
+					src[i] = src[ai]+2;
+
+				// (-1,-1)
+				if (rcGetCon(as, 3) != RC_NOT_CONNECTED)
 				{
-					// (-1,0)
-					const int ax = x + rcGetDirOffsetX(0);
-					const int ay = y + rcGetDirOffsetY(0);
-					const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 0);
-					const rcCompactSpan& as = chf.spans[ai];
-					if (src[ai]+2 < src[i])
-						src[i] = src[ai]+2;
-					
-					// (-1,-1)
-					if (rcGetCon(as, 3) != RC_NOT_CONNECTED)
-					{
-						const int aax = ax + rcGetDirOffsetX(3);
-						const int aay = ay + rcGetDirOffsetY(3);
-						const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 3);
-						if (src[aai]+3 < src[i])
-							src[i] = src[aai]+3;
-					}
+					const int aax = ax + rcGetDirOffsetX(3);
+					const int aay = ay + rcGetDirOffsetY(3);
+					const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 3);
+					if (src[aai]+3 < src[i])
+						src[i] = src[aai]+3;
 				}
-				if (rcGetCon(s, 3) != RC_NOT_CONNECTED)
+			}
+			if (rcGetCon(s, 3) != RC_NOT_CONNECTED)
+			{
+				// (0,-1)
+				const int ax = x + rcGetDirOffsetX(3);
+				const int ay = y + rcGetDirOffsetY(3);
+				const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 3);
+				const rcCompactSpan& as = chf.spans[ai];
+				if (src[ai]+2 < src[i])
+					src[i] = src[ai]+2;
+
+				// (1,-1)
+				if (rcGetCon(as, 2) != RC_NOT_CONNECTED)
 				{
-					// (0,-1)
-					const int ax = x + rcGetDirOffsetX(3);
-					const int ay = y + rcGetDirOffsetY(3);
-					const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 3);
-					const rcCompactSpan& as = chf.spans[ai];
-					if (src[ai]+2 < src[i])
-						src[i] = src[ai]+2;
-					
-					// (1,-1)
-					if (rcGetCon(as, 2) != RC_NOT_CONNECTED)
-					{
-						const int aax = ax + rcGetDirOffsetX(2);
-						const int aay = ay + rcGetDirOffsetY(2);
-						const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 2);
-						if (src[aai]+3 < src[i])
-							src[i] = src[aai]+3;
-					}
+					const int aax = ax + rcGetDirOffsetX(2);
+					const int aay = ay + rcGetDirOffsetY(2);
+					const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 2);
+					if (src[aai]+3 < src[i])
+						src[i] = src[aai]+3;
 				}
 			}
 		}
 	}
 	
 	// Pass 2
-	for (int y = h-1; y >= 0; --y)
+	for (int ci = activeCellCount-1; ci >= 0; --ci)
 	{
-		for (int x = w-1; x >= 0; --x)
+		const int columnIndex = activeCells[ci];
+		int x, y;
+		getCellCoords(columnIndex, w, x, y);
+		const rcCompactCell& c = chf.cells[columnIndex];
+		for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
 		{
-			const rcCompactCell& c = chf.cells[x+y*w];
-			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
+			const rcCompactSpan& s = chf.spans[i];
+
+			if (rcGetCon(s, 2) != RC_NOT_CONNECTED)
 			{
-				const rcCompactSpan& s = chf.spans[i];
-				
-				if (rcGetCon(s, 2) != RC_NOT_CONNECTED)
+				// (1,0)
+				const int ax = x + rcGetDirOffsetX(2);
+				const int ay = y + rcGetDirOffsetY(2);
+				const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 2);
+				const rcCompactSpan& as = chf.spans[ai];
+				if (src[ai]+2 < src[i])
+					src[i] = src[ai]+2;
+
+				// (1,1)
+				if (rcGetCon(as, 1) != RC_NOT_CONNECTED)
 				{
-					// (1,0)
-					const int ax = x + rcGetDirOffsetX(2);
-					const int ay = y + rcGetDirOffsetY(2);
-					const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 2);
-					const rcCompactSpan& as = chf.spans[ai];
-					if (src[ai]+2 < src[i])
-						src[i] = src[ai]+2;
-					
-					// (1,1)
-					if (rcGetCon(as, 1) != RC_NOT_CONNECTED)
-					{
-						const int aax = ax + rcGetDirOffsetX(1);
-						const int aay = ay + rcGetDirOffsetY(1);
-						const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 1);
-						if (src[aai]+3 < src[i])
-							src[i] = src[aai]+3;
-					}
+					const int aax = ax + rcGetDirOffsetX(1);
+					const int aay = ay + rcGetDirOffsetY(1);
+					const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 1);
+					if (src[aai]+3 < src[i])
+						src[i] = src[aai]+3;
 				}
-				if (rcGetCon(s, 1) != RC_NOT_CONNECTED)
+			}
+			if (rcGetCon(s, 1) != RC_NOT_CONNECTED)
+			{
+				// (0,1)
+				const int ax = x + rcGetDirOffsetX(1);
+				const int ay = y + rcGetDirOffsetY(1);
+				const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 1);
+				const rcCompactSpan& as = chf.spans[ai];
+				if (src[ai]+2 < src[i])
+					src[i] = src[ai]+2;
+
+				// (-1,1)
+				if (rcGetCon(as, 0) != RC_NOT_CONNECTED)
 				{
-					// (0,1)
-					const int ax = x + rcGetDirOffsetX(1);
-					const int ay = y + rcGetDirOffsetY(1);
-					const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, 1);
-					const rcCompactSpan& as = chf.spans[ai];
-					if (src[ai]+2 < src[i])
-						src[i] = src[ai]+2;
-					
-					// (-1,1)
-					if (rcGetCon(as, 0) != RC_NOT_CONNECTED)
-					{
-						const int aax = ax + rcGetDirOffsetX(0);
-						const int aay = ay + rcGetDirOffsetY(0);
-						const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 0);
-						if (src[aai]+3 < src[i])
-							src[i] = src[aai]+3;
-					}
+					const int aax = ax + rcGetDirOffsetX(0);
+					const int aay = ay + rcGetDirOffsetY(0);
+					const int aai = (int)chf.cells[aax+aay*w].index + rcGetCon(as, 0);
+					if (src[aai]+3 < src[i])
+						src[i] = src[aai]+3;
 				}
 			}
 		}
@@ -190,59 +195,59 @@ static void calculateDistanceField(rcCompactHeightfield& chf, unsigned short* sr
 }
 
 static unsigned short* boxBlur(rcCompactHeightfield& chf, int thr,
-							   unsigned short* src, unsigned short* dst)
+							   unsigned short* src, unsigned short* dst,
+							   const int* activeCells, const int activeCellCount)
 {
 	const int w = chf.width;
-	const int h = chf.height;
 	
 	thr *= 2;
 	
-	for (int y = 0; y < h; ++y)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < w; ++x)
+		const int columnIndex = activeCells[ci];
+		int x, y;
+		getCellCoords(columnIndex, w, x, y);
+		const rcCompactCell& c = chf.cells[columnIndex];
+		for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
 		{
-			const rcCompactCell& c = chf.cells[x+y*w];
-			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
+			const rcCompactSpan& s = chf.spans[i];
+			const unsigned short cd = src[i];
+			if (cd <= thr)
 			{
-				const rcCompactSpan& s = chf.spans[i];
-				const unsigned short cd = src[i];
-				if (cd <= thr)
-				{
-					dst[i] = cd;
-					continue;
-				}
+				dst[i] = cd;
+				continue;
+			}
 
-				int d = (int)cd;
-				for (int dir = 0; dir < 4; ++dir)
+			int d = (int)cd;
+			for (int dir = 0; dir < 4; ++dir)
+			{
+				if (rcGetCon(s, dir) != RC_NOT_CONNECTED)
 				{
-					if (rcGetCon(s, dir) != RC_NOT_CONNECTED)
+					const int ax = x + rcGetDirOffsetX(dir);
+					const int ay = y + rcGetDirOffsetY(dir);
+					const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, dir);
+					d += (int)src[ai];
+
+					const rcCompactSpan& as = chf.spans[ai];
+					const int dir2 = (dir+1) & 0x3;
+					if (rcGetCon(as, dir2) != RC_NOT_CONNECTED)
 					{
-						const int ax = x + rcGetDirOffsetX(dir);
-						const int ay = y + rcGetDirOffsetY(dir);
-						const int ai = (int)chf.cells[ax+ay*w].index + rcGetCon(s, dir);
-						d += (int)src[ai];
-						
-						const rcCompactSpan& as = chf.spans[ai];
-						const int dir2 = (dir+1) & 0x3;
-						if (rcGetCon(as, dir2) != RC_NOT_CONNECTED)
-						{
-							const int ax2 = ax + rcGetDirOffsetX(dir2);
-							const int ay2 = ay + rcGetDirOffsetY(dir2);
-							const int ai2 = (int)chf.cells[ax2+ay2*w].index + rcGetCon(as, dir2);
-							d += (int)src[ai2];
-						}
-						else
-						{
-							d += cd;
-						}
+						const int ax2 = ax + rcGetDirOffsetX(dir2);
+						const int ay2 = ay + rcGetDirOffsetY(dir2);
+						const int ai2 = (int)chf.cells[ax2+ay2*w].index + rcGetCon(as, dir2);
+						d += (int)src[ai2];
 					}
 					else
 					{
-						d += cd*2;
+						d += cd;
 					}
 				}
-				dst[i] = (unsigned short)((d+5)/9);
+				else
+				{
+					d += cd*2;
+				}
 			}
+			dst[i] = (unsigned short)((d+5)/9);
 		}
 	}
 	return dst;
@@ -362,26 +367,26 @@ static void expandRegions(int maxIter, unsigned short level,
 					      rcCompactHeightfield& chf,
 					      unsigned short* srcReg, unsigned short* srcDist,
 					      rcTempVector<LevelStackEntry>& stack,
+					      rcTempVector<DirtyEntry>& dirtyEntries,
+					      const int* activeCells, const int activeCellCount,
 					      bool fillStack)
 {
 	const int w = chf.width;
-	const int h = chf.height;
-
 	if (fillStack)
 	{
 		// Find cells revealed by the raised level.
 		stack.clear();
-		for (int y = 0; y < h; ++y)
+		for (int ci = 0; ci < activeCellCount; ++ci)
 		{
-			for (int x = 0; x < w; ++x)
+			const int columnIndex = activeCells[ci];
+			int x, y;
+			getCellCoords(columnIndex, w, x, y);
+			const rcCompactCell& c = chf.cells[columnIndex];
+			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
 			{
-				const rcCompactCell& c = chf.cells[x+y*w];
-				for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
+				if (chf.dist[i] >= level && srcReg[i] == 0 && chf.areas[i] != RC_NULL_AREA)
 				{
-					if (chf.dist[i] >= level && srcReg[i] == 0 && chf.areas[i] != RC_NULL_AREA)
-					{
-						stack.push_back(LevelStackEntry(x, y, i));
-					}
+					stack.push_back(LevelStackEntry(x, y, i));
 				}
 			}
 		}
@@ -397,7 +402,6 @@ static void expandRegions(int maxIter, unsigned short level,
 		}
 	}
 
-	rcTempVector<DirtyEntry> dirtyEntries;
 	int iter = 0;
 	while (stack.size() > 0)
 	{
@@ -464,55 +468,51 @@ static void expandRegions(int maxIter, unsigned short level,
 		}
 	}
 }
-
-
-
 static void sortCellsByLevel(unsigned short startLevel,
 							  rcCompactHeightfield& chf,
 							  const unsigned short* srcReg,
 							  unsigned int nbStacks, rcTempVector<LevelStackEntry>* stacks,
-							  unsigned short loglevelsPerStack) // the levels per stack (2 in our case) as a bit shift
+							  unsigned short loglevelsPerStack)
 {
 	const int w = chf.width;
-	const int h = chf.height;
 	startLevel = startLevel >> loglevelsPerStack;
 
-	for (unsigned int j=0; j<nbStacks; ++j)
+	for (unsigned int j = 0; j < nbStacks; ++j)
 		stacks[j].clear();
 
-	// put all cells in the level range into the appropriate stacks
-	for (int y = 0; y < h; ++y)
+	const int activeCellCount = chf.activeCellCount;
+	const int* activeCells = chf.activeCells;
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < w; ++x)
+		const int columnIndex = activeCells[ci];
+		int x, y;
+		getCellCoords(columnIndex, w, x, y);
+		const rcCompactCell& c = chf.cells[columnIndex];
+		for (int i = (int)c.index, ni = (int)(c.index + c.count); i < ni; ++i)
 		{
-			const rcCompactCell& c = chf.cells[x+y*w];
-			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
-			{
-				if (chf.areas[i] == RC_NULL_AREA || srcReg[i] != 0)
-					continue;
+			if (chf.areas[i] == RC_NULL_AREA || srcReg[i] != 0)
+				continue;
 
-				int level = chf.dist[i] >> loglevelsPerStack;
-				int sId = startLevel - level;
-				if (sId >= (int)nbStacks)
-					continue;
-				if (sId < 0)
-					sId = 0;
+			int level = chf.dist[i] >> loglevelsPerStack;
+			int sId = startLevel - level;
+			if (sId >= (int)nbStacks)
+				continue;
+			if (sId < 0)
+				sId = 0;
 
-				stacks[sId].push_back(LevelStackEntry(x, y, i));
-			}
+			stacks[sId].push_back(LevelStackEntry(x, y, i));
 		}
 	}
 }
-
 
 static void appendStacks(const rcTempVector<LevelStackEntry>& srcStack,
 						 rcTempVector<LevelStackEntry>& dstStack,
 						 const unsigned short* srcReg)
 {
-	for (int j=0; j<srcStack.size(); j++)
+	for (int j = 0; j < srcStack.size(); ++j)
 	{
-		int i = srcStack[j].index;
-		if ((i < 0) || (srcReg[i] != 0))
+		const int i = srcStack[j].index;
+		if (i < 0 || srcReg[i] != 0)
 			continue;
 		dstStack.push_back(srcStack[j]);
 	}
@@ -610,13 +610,14 @@ static void addUniqueFloorRegion(rcRegion& reg, int n)
 	reg.floors.push_back(n);
 }
 
-static bool mergeRegions(rcRegion& rega, rcRegion& regb)
+static bool mergeRegions(rcRegion& rega, rcRegion& regb, rcTempVector<int>& scratch)
 {
 	unsigned short aid = rega.id;
 	unsigned short bid = regb.id;
 	
 	// Duplicate current neighbourhood.
-	rcTempVector<int> acon;
+	rcTempVector<int>& acon = scratch;
+	acon.clear();
 	acon.resize(rega.connections.size());
 	for (int i = 0; i < rega.connections.size(); ++i)
 		acon[i] = rega.connections[i];
@@ -792,11 +793,10 @@ static void walkContour(int x, int y, int i, int dir,
 static bool mergeAndFilterRegions(rcContext* ctx, int minRegionArea, int mergeRegionSize,
 								  unsigned short& maxRegionId,
 								  rcCompactHeightfield& chf,
-								  unsigned short* srcReg, rcTempVector<int>& overlaps)
+								  unsigned short* srcReg, rcTempVector<int>& overlaps,
+								  const int* activeCells, const int activeCellCount)
 {
 	const int w = chf.width;
-	const int h = chf.height;
-	
 	const int nreg = maxRegionId+1;
 	rcTempVector<rcRegion> regions;
 	if (!regions.reserve(nreg)) {
@@ -809,55 +809,55 @@ static bool mergeAndFilterRegions(rcContext* ctx, int minRegionArea, int mergeRe
 		regions.push_back(rcRegion((unsigned short) i));
 	
 	// Find edge of a region and find connections around the contour.
-	for (int y = 0; y < h; ++y)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < w; ++x)
+		const int columnIndex = activeCells[ci];
+		int x, y;
+		getCellCoords(columnIndex, w, x, y);
+		const rcCompactCell& c = chf.cells[columnIndex];
+		for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
 		{
-			const rcCompactCell& c = chf.cells[x+y*w];
-			for (int i = (int)c.index, ni = (int)(c.index+c.count); i < ni; ++i)
+			unsigned short r = srcReg[i];
+			if (r == 0 || r >= nreg)
+				continue;
+
+			rcRegion& reg = regions[r];
+			reg.spanCount++;
+
+			// Update floors.
+			for (int j = (int)c.index; j < ni; ++j)
 			{
-				unsigned short r = srcReg[i];
-				if (r == 0 || r >= nreg)
+				if (i == j) continue;
+				unsigned short floorId = srcReg[j];
+				if (floorId == 0 || floorId >= nreg)
 					continue;
-				
-				rcRegion& reg = regions[r];
-				reg.spanCount++;
-				
-				// Update floors.
-				for (int j = (int)c.index; j < ni; ++j)
+				if (floorId == r)
+					reg.overlap = true;
+				addUniqueFloorRegion(reg, floorId);
+			}
+
+			// Have found contour
+			if (reg.connections.size() > 0)
+				continue;
+
+			reg.areaType = chf.areas[i];
+
+			// Check if this cell is next to a border.
+			int ndir = -1;
+			for (int dir = 0; dir < 4; ++dir)
+			{
+				if (isSolidEdge(chf, srcReg, x, y, i, dir))
 				{
-					if (i == j) continue;
-					unsigned short floorId = srcReg[j];
-					if (floorId == 0 || floorId >= nreg)
-						continue;
-					if (floorId == r)
-						reg.overlap = true;
-					addUniqueFloorRegion(reg, floorId);
+					ndir = dir;
+					break;
 				}
-				
-				// Have found contour
-				if (reg.connections.size() > 0)
-					continue;
-				
-				reg.areaType = chf.areas[i];
-				
-				// Check if this cell is next to a border.
-				int ndir = -1;
-				for (int dir = 0; dir < 4; ++dir)
-				{
-					if (isSolidEdge(chf, srcReg, x, y, i, dir))
-					{
-						ndir = dir;
-						break;
-					}
-				}
-				
-				if (ndir != -1)
-				{
-					// The cell is at border.
-					// Walk around the contour to find all the neighbours.
-					walkContour(x, y, i, ndir, chf, srcReg, reg.connections);
-				}
+			}
+
+			if (ndir != -1)
+			{
+				// The cell is at border.
+				// Walk around the contour to find all the neighbours.
+				walkContour(x, y, i, ndir, chf, srcReg, reg.connections);
 			}
 		}
 	}
@@ -929,6 +929,7 @@ static bool mergeAndFilterRegions(rcContext* ctx, int minRegionArea, int mergeRe
 	}
 	
 	// Merge too small regions to neighbour regions.
+	rcTempVector<int> mergeScratch;
 	int mergeCount = 0 ;
 	do
 	{
@@ -972,7 +973,7 @@ static bool mergeAndFilterRegions(rcContext* ctx, int minRegionArea, int mergeRe
 				rcRegion& target = regions[mergeId];
 				
 				// Merge neighbours.
-				if (mergeRegions(target, reg))
+				if (mergeRegions(target, reg, mergeScratch))
 				{
 					// Fixup regions pointing to current region.
 					for (int j = 0; j < nreg; ++j)
@@ -1002,22 +1003,28 @@ static bool mergeAndFilterRegions(rcContext* ctx, int minRegionArea, int mergeRe
 		regions[i].remap = true;
 	}
 	
+	unsigned short* newIds = (unsigned short*)rcAlloc(sizeof(unsigned short)*nreg, RC_ALLOC_TEMP);
+	if (!newIds)
+	{
+		ctx->log(RC_LOG_ERROR, "mergeAndFilterRegions: Out of memory 'newIds' (%d).", nreg);
+		return false;
+	}
+	memset(newIds, 0, sizeof(unsigned short)*nreg);
 	unsigned short regIdGen = 0;
 	for (int i = 0; i < nreg; ++i)
 	{
 		if (!regions[i].remap)
 			continue;
 		unsigned short oldId = regions[i].id;
-		unsigned short newId = ++regIdGen;
-		for (int j = i; j < nreg; ++j)
-		{
-			if (regions[j].id == oldId)
-			{
-				regions[j].id = newId;
-				regions[j].remap = false;
-			}
-		}
+		if (newIds[oldId] == 0)
+			newIds[oldId] = ++regIdGen;
 	}
+	for (int i = 0; i < nreg; ++i)
+	{
+		if (regions[i].id != 0 && (regions[i].id & RC_BORDER_REG) == 0)
+			regions[i].id = newIds[regions[i].id];
+	}
+	rcFree(newIds);
 	maxRegionId = regIdGen;
 	
 	// Remap regions.
@@ -1284,13 +1291,15 @@ bool rcBuildDistanceField(rcContext* ctx, rcCompactHeightfield& chf)
 		rcFree(src);
 		return false;
 	}
+	const int activeCellCount = chf.activeCellCount;
+	const int* activeCells = chf.activeCells;
 	
 	unsigned short maxDist = 0;
 
 	{
 		rcScopedTimer timerDist(ctx, RC_TIMER_BUILD_DISTANCEFIELD_DIST);
 
-		calculateDistanceField(chf, src, maxDist);
+		calculateDistanceField(chf, src, maxDist, activeCells, activeCellCount);
 		chf.maxDistance = maxDist;
 	}
 
@@ -1298,7 +1307,7 @@ bool rcBuildDistanceField(rcContext* ctx, rcCompactHeightfield& chf)
 		rcScopedTimer timerBlur(ctx, RC_TIMER_BUILD_DISTANCEFIELD_BLUR);
 
 		// Blur
-		if (boxBlur(chf, 1, src, dst) != src)
+		if (boxBlur(chf, 1, src, dst, activeCells, activeCellCount) != src)
 			rcSwap(src, dst);
 
 		// Store distance.
@@ -1384,6 +1393,8 @@ bool rcBuildRegionsMonotone(rcContext* ctx, rcCompactHeightfield& chf,
 		ctx->log(RC_LOG_ERROR, "rcBuildRegionsMonotone: Out of memory 'sweeps' (%d).", nsweeps);
 		return false;
 	}
+	const int activeCellCount = chf.activeCellCount;
+	const int* activeCells = chf.activeCells;
 	
 	
 	// Mark border regions.
@@ -1499,7 +1510,8 @@ bool rcBuildRegionsMonotone(rcContext* ctx, rcCompactHeightfield& chf,
 		// Merge regions and filter out small regions.
 		rcTempVector<int> overlaps;
 		chf.maxRegions = id;
-		if (!mergeAndFilterRegions(ctx, minRegionArea, mergeRegionArea, chf.maxRegions, chf, srcReg, overlaps))
+		if (!mergeAndFilterRegions(ctx, minRegionArea, mergeRegionArea, chf.maxRegions, chf, srcReg, overlaps,
+								   activeCells, activeCellCount))
 			return false;
 
 		// Monotone partitioning does not generate overlapping regions.
@@ -1547,23 +1559,25 @@ bool rcBuildRegions(rcContext* ctx, rcCompactHeightfield& chf,
 		ctx->log(RC_LOG_ERROR, "rcBuildRegions: Out of memory 'tmp' (%d).", chf.spanCount*4);
 		return false;
 	}
+	const int activeCellCount = chf.activeCellCount;
+	const int* activeCells = chf.activeCells;
 	
 	ctx->startTimer(RC_TIMER_BUILD_REGIONS_WATERSHED);
 
 	const int LOG_NB_STACKS = 3;
 	const int NB_STACKS = 1 << LOG_NB_STACKS;
 	rcTempVector<LevelStackEntry> lvlStacks[NB_STACKS];
-	for (int i=0; i<NB_STACKS; ++i)
+	for (int i = 0; i < NB_STACKS; ++i)
 		lvlStacks[i].reserve(256);
 
 	rcTempVector<LevelStackEntry> stack;
 	stack.reserve(256);
+	rcTempVector<DirtyEntry> dirtyEntries;
 	
 	unsigned short* srcReg = buf;
 	unsigned short* srcDist = buf+chf.spanCount;
 	
 	memset(srcReg, 0, sizeof(unsigned short)*chf.spanCount);
-	memset(srcDist, 0, sizeof(unsigned short)*chf.spanCount);
 	
 	unsigned short regionId = 1;
 	unsigned short level = (chf.maxDistance+1) & ~1;
@@ -1595,20 +1609,17 @@ bool rcBuildRegions(rcContext* ctx, rcCompactHeightfield& chf,
 		level = level >= 2 ? level-2 : 0;
 		sId = (sId+1) & (NB_STACKS-1);
 
-//		ctx->startTimer(RC_TIMER_DIVIDE_TO_LEVELS);
-
 		if (sId == 0)
 			sortCellsByLevel(level, chf, srcReg, NB_STACKS, lvlStacks, 1);
-		else 
-			appendStacks(lvlStacks[sId-1], lvlStacks[sId], srcReg); // copy left overs from last level
-
-//		ctx->stopTimer(RC_TIMER_DIVIDE_TO_LEVELS);
+		else
+			appendStacks(lvlStacks[sId-1], lvlStacks[sId], srcReg);
 
 		{
 			rcScopedTimer timerExpand(ctx, RC_TIMER_BUILD_REGIONS_EXPAND);
 
 			// Expand current regions until no empty connected cells found.
-			expandRegions(expandIters, level, chf, srcReg, srcDist, lvlStacks[sId], false);
+			expandRegions(expandIters, level, chf, srcReg, srcDist, lvlStacks[sId], dirtyEntries,
+						  activeCells, activeCellCount, false);
 		}
 		
 		{
@@ -1639,7 +1650,8 @@ bool rcBuildRegions(rcContext* ctx, rcCompactHeightfield& chf,
 	}
 	
 	// Expand current regions until no empty connected cells found.
-	expandRegions(expandIters*8, 0, chf, srcReg, srcDist, stack, true);
+	expandRegions(expandIters*8, 0, chf, srcReg, srcDist, stack, dirtyEntries,
+				  activeCells, activeCellCount, true);
 	
 	ctx->stopTimer(RC_TIMER_BUILD_REGIONS_WATERSHED);
 	
@@ -1649,7 +1661,8 @@ bool rcBuildRegions(rcContext* ctx, rcCompactHeightfield& chf,
 		// Merge regions and filter out small regions.
 		rcTempVector<int> overlaps;
 		chf.maxRegions = regionId;
-		if (!mergeAndFilterRegions(ctx, minRegionArea, mergeRegionArea, chf.maxRegions, chf, srcReg, overlaps))
+		if (!mergeAndFilterRegions(ctx, minRegionArea, mergeRegionArea, chf.maxRegions, chf, srcReg, overlaps,
+								   activeCells, activeCellCount))
 			return false;
 
 		// If overlapping regions were found during merging, split those regions.

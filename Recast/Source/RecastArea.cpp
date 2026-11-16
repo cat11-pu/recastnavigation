@@ -77,7 +77,6 @@ bool rcErodeWalkableArea(rcContext* context, const int erosionRadius, rcCompactH
 	rcAssert(context != NULL);
 
 	const int xSize = compactHeightfield.width;
-	const int zSize = compactHeightfield.height;
 	const int& zStride = xSize; // For readability
 
 	rcScopedTimer timer(context, RC_TIMER_ERODE_AREA);
@@ -90,11 +89,15 @@ bool rcErodeWalkableArea(rcContext* context, const int erosionRadius, rcCompactH
 		return false;
 	}
 	memset(distanceToBoundary, 0xff, sizeof(unsigned char) * compactHeightfield.spanCount);
+	const int activeCellCount = compactHeightfield.activeCellCount;
+	const int* activeCells = compactHeightfield.activeCells;
 	
 	// Mark boundary cells.
-	for (int z = 0; z < zSize; ++z)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < xSize; ++x)
+		const int columnIndex = activeCells[ci];
+		const int z = columnIndex / zStride;
+		const int x = columnIndex - z * zStride;
 		{
 			const rcCompactCell& cell = compactHeightfield.cells[x + z * zStride];
 			for (int spanIndex = (int)cell.index, maxSpanIndex = (int)(cell.index + cell.count); spanIndex < maxSpanIndex; ++spanIndex)
@@ -139,9 +142,11 @@ bool rcErodeWalkableArea(rcContext* context, const int erosionRadius, rcCompactH
 	unsigned char newDistance;
 	
 	// Pass 1
-	for (int z = 0; z < zSize; ++z)
+	for (int ci = 0; ci < activeCellCount; ++ci)
 	{
-		for (int x = 0; x < xSize; ++x)
+		const int columnIndex = activeCells[ci];
+		const int z = columnIndex / zStride;
+		const int x = columnIndex - z * zStride;
 		{
 			const rcCompactCell& cell = compactHeightfield.cells[x + z * zStride];
 			const int maxSpanIndex = (int)(cell.index + cell.count);
@@ -206,9 +211,11 @@ bool rcErodeWalkableArea(rcContext* context, const int erosionRadius, rcCompactH
 	}
 
 	// Pass 2
-	for (int z = zSize - 1; z >= 0; --z)
+	for (int ci = activeCellCount - 1; ci >= 0; --ci)
 	{
-		for (int x = xSize - 1; x >= 0; --x)
+		const int columnIndex = activeCells[ci];
+		const int z = columnIndex / zStride;
+		const int x = columnIndex - z * zStride;
 		{
 			const rcCompactCell& cell = compactHeightfield.cells[x + z * zStride];
 			const int maxSpanIndex = (int)(cell.index + cell.count);

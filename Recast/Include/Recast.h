@@ -325,6 +325,8 @@ struct rcHeightfield
 	// memory pool for rcSpan instances.
 	rcSpanPool* pools;	///< Linked list of span pools.
 	rcSpan* freelist;	///< The next free span.
+	unsigned int* columnMask;	///< Bitmask of columns that contain spans.
+	int columnMaskWordCount;	///< Number of words in #columnMask.
 
 private:
 	// Explicitly-disabled copy constructor and copy assignment operator.
@@ -371,6 +373,8 @@ struct rcCompactHeightfield
 	rcCompactSpan* spans;		///< Array of spans. [Size: #spanCount]
 	unsigned short* dist;		///< Array containing border distance data. [Size: #spanCount]
 	unsigned char* areas;		///< Array containing area id data. [Size: #spanCount]
+	int* activeCells;			///< Row-major indices of non-empty cells. [Size: #activeCellCount]
+	int activeCellCount;		///< Number of entries in #activeCells.
 	
 private:
 	// Explicitly-disabled copy constructor and copy assignment operator.

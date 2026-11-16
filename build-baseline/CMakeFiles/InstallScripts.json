@@ -1,0 +1,13 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/cat/gsb/uid3839/build-baseline/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-baseline/DebugUtils/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-baseline/Detour/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-baseline/DetourCrowd/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-baseline/DetourTileCache/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-baseline/Recast/cmake_install.cmake",
+		"/home/cat/gsb/uid3839/build-baseline/Tests/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

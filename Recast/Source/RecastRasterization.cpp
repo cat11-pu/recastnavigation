@@ -17,6 +17,7 @@
 //
 
 #include <math.h>
+#include <string.h>
 #include "Recast.h"
 #include "RecastAlloc.h"
 #include "RecastAssert.h"
@@ -102,36 +103,59 @@ static void freeSpan(rcHeightfield& heightfield, rcSpan* span)
 /// @param[in]	max					The new span's maximum cell index
 /// @param[in]	areaID				The new span's area type ID
 /// @param[in]	flagMergeThreshold	How close two spans maximum extents need to be to merge area type IDs
-static bool addSpan(rcHeightfield& heightfield,
-                    const int x, const int z,
-                    const unsigned short min, const unsigned short max,
-                    const unsigned char areaID, const int flagMergeThreshold)
+static inline bool addSpan(rcHeightfield& heightfield,
+                           const int x, const int z,
+                           const unsigned short min, const unsigned short max,
+                           const unsigned char areaID, const int flagMergeThreshold)
 {
-	// Create the new span.
-	rcSpan* newSpan = allocSpan(heightfield);
-	if (newSpan == NULL)
-	{
-		return false;
-	}
-	newSpan->smin = min;
-	newSpan->smax = max;
-	newSpan->area = areaID;
-	newSpan->next = NULL;
-	
 	const int columnIndex = x + z * heightfield.width;
+	const bool columnWasEmpty = heightfield.spans[columnIndex] == NULL;
+	if (columnWasEmpty)
+	{
+		rcSpan* span = allocSpan(heightfield);
+		if (span == NULL)
+			return false;
+		span->smin = min;
+		span->smax = max;
+		span->area = areaID;
+		span->next = NULL;
+		heightfield.spans[columnIndex] = span;
+		if (heightfield.columnMask)
+			heightfield.columnMask[columnIndex >> 5] |= 1u << (columnIndex & 31);
+		return true;
+	}
+
+	rcSpan* firstSpan = heightfield.spans[columnIndex];
+	if (firstSpan->next == NULL && firstSpan->smax >= min && firstSpan->smin <= max)
+	{
+		const unsigned short mergedSmin = rcMin(static_cast<unsigned short>(firstSpan->smin), min);
+		const unsigned short mergedSmax = rcMax(static_cast<unsigned short>(firstSpan->smax), max);
+		unsigned char mergedArea = areaID;
+		if (rcAbs((int)mergedSmax - (int)firstSpan->smax) <= flagMergeThreshold)
+			mergedArea = rcMax(mergedArea, static_cast<unsigned char>(firstSpan->area));
+		firstSpan->smin = mergedSmin;
+		firstSpan->smax = mergedSmax;
+		firstSpan->area = mergedArea;
+		return true;
+	}
+
 	rcSpan* previousSpan = NULL;
 	rcSpan* currentSpan = heightfield.spans[columnIndex];
+	rcSpan* newSpan = NULL;
+	unsigned short newSpanMin = min;
+	unsigned short newSpanMax = max;
+	unsigned char newSpanArea = areaID;
 	
 	// Insert the new span, possibly merging it with existing spans.
 	while (currentSpan != NULL)
 	{
-		if (currentSpan->smin > newSpan->smax)
+		if (currentSpan->smin > newSpanMax)
 		{
 			// Current span is completely after the new span, break.
 			break;
 		}
 		
-		if (currentSpan->smax < newSpan->smin)
+		if (currentSpan->smax < newSpanMin)
 		{
 			// Current span is completely before the new span.  Keep going.
 			previousSpan = currentSpan;
@@ -140,49 +164,79 @@ static bool addSpan(rcHeightfield& heightfield,
 		else
 		{
 			// The new span overlaps with an existing span.  Merge them.
-			if (currentSpan->smin < newSpan->smin)
+			if (currentSpan->smin < newSpanMin)
 			{
-				newSpan->smin = currentSpan->smin;
+				newSpanMin = currentSpan->smin;
 			}
-			if (currentSpan->smax > newSpan->smax)
+			if (currentSpan->smax > newSpanMax)
 			{
-				newSpan->smax = currentSpan->smax;
+				newSpanMax = currentSpan->smax;
 			}
 			
 			// Merge flags.
-			if (rcAbs((int)newSpan->smax - (int)currentSpan->smax) <= flagMergeThreshold)
+			if (rcAbs((int)newSpanMax - (int)currentSpan->smax) <= flagMergeThreshold)
 			{
 				// Higher area ID numbers indicate higher resolution priority.
-				newSpan->area = rcMax(newSpan->area, currentSpan->area);
+				newSpanArea = rcMax(newSpanArea, static_cast<unsigned char>(currentSpan->area));
 			}
 			
-			// Remove the current span since it's now merged with newSpan.
-			// Keep going because there might be other overlapping spans that also need to be merged.
 			rcSpan* next = currentSpan->next;
-			freeSpan(heightfield, currentSpan);
-			if (previousSpan)
+			if (newSpan == NULL)
 			{
-				previousSpan->next = next;
+				// Reuse the first overlapping span instead of allocating a new
+				// one. This keeps the hot rasterization path allocation-free
+				// when adding spans to an existing surface.
+				newSpan = currentSpan;
+				previousSpan = currentSpan;
 			}
 			else
 			{
-				heightfield.spans[columnIndex] = next;
+				// Remove the current span since it's now merged with newSpan.
+				// Keep going because there might be other overlapping spans
+				// that also need to be merged.
+				freeSpan(heightfield, currentSpan);
+				if (previousSpan)
+				{
+					previousSpan->next = next;
+				}
+				else
+				{
+					heightfield.spans[columnIndex] = next;
+				}
 			}
 			currentSpan = next;
 		}
 	}
-	
-	// Insert new span after prev
-	if (previousSpan != NULL)
+
+	if (newSpan != NULL)
 	{
-		newSpan->next = previousSpan->next;
-		previousSpan->next = newSpan;
+		newSpan->smin = newSpanMin;
+		newSpan->smax = newSpanMax;
+		newSpan->area = newSpanArea;
 	}
 	else
 	{
-		// This span should go before the others in the list
-		newSpan->next = heightfield.spans[columnIndex];
-		heightfield.spans[columnIndex] = newSpan;
+		newSpan = allocSpan(heightfield);
+		if (newSpan == NULL)
+		{
+			return false;
+		}
+		newSpan->smin = newSpanMin;
+		newSpan->smax = newSpanMax;
+		newSpan->area = newSpanArea;
+
+		// Insert new span after prev
+		if (previousSpan != NULL)
+		{
+			newSpan->next = previousSpan->next;
+			previousSpan->next = newSpan;
+		}
+		else
+		{
+			// This span should go before the others in the list
+			newSpan->next = heightfield.spans[columnIndex];
+			heightfield.spans[columnIndex] = newSpan;
+		}
 	}
 
 	return true;
@@ -229,30 +283,35 @@ enum rcAxis
 /// @param[out]	outVerts2Count	The number of resulting polygon 2 vertices
 /// @param[in]	axisOffset		THe offset along the specified axis
 /// @param[in]	axis			The separating axis
-static void dividePoly(const float* inVerts, int inVertsCount,
-                       float* outVerts1, int* outVerts1Count,
-                       float* outVerts2, int* outVerts2Count,
-                       float axisOffset, rcAxis axis)
+static inline void dividePoly(const float* inVerts, int inVertsCount,
+                              float* outVerts1, int* outVerts1Count,
+                              float* outVerts2, int* outVerts2Count,
+                              float axisOffset, rcAxis axis)
 {
 	rcAssert(inVertsCount <= 12);
-	
-	// How far positive or negative away from the separating axis is each vertex.
-	float inVertAxisDelta[12];
-	for (int inVert = 0; inVert < inVertsCount; ++inVert)
+	if (inVertsCount == 0)
 	{
-		inVertAxisDelta[inVert] = axisOffset - inVerts[inVert * 3 + axis];
+		*outVerts1Count = 0;
+		*outVerts2Count = 0;
+		return;
 	}
+
+	// How far positive or negative away from the separating axis is each vertex.
+	int inVertB = inVertsCount - 1;
+	float deltaB = axisOffset - inVerts[inVertB * 3 + axis];
 
 	int poly1Vert = 0;
 	int poly2Vert = 0;
-	for (int inVertA = 0, inVertB = inVertsCount - 1; inVertA < inVertsCount; inVertB = inVertA, ++inVertA)
+	for (int inVertA = 0; inVertA < inVertsCount; inVertB = inVertA, ++inVertA)
 	{
+		const float deltaA = axisOffset - inVerts[inVertA * 3 + axis];
+
 		// If the two vertices are on the same side of the separating axis
-		bool sameSide = (inVertAxisDelta[inVertA] >= 0) == (inVertAxisDelta[inVertB] >= 0);
+		bool sameSide = (deltaA >= 0) == (deltaB >= 0);
 
 		if (!sameSide)
 		{
-			float s = inVertAxisDelta[inVertB] / (inVertAxisDelta[inVertB] - inVertAxisDelta[inVertA]);
+			float s = deltaB / (deltaB - deltaA);
 			outVerts1[poly1Vert * 3 + 0] = inVerts[inVertB * 3 + 0] + (inVerts[inVertA * 3 + 0] - inVerts[inVertB * 3 + 0]) * s;
 			outVerts1[poly1Vert * 3 + 1] = inVerts[inVertB * 3 + 1] + (inVerts[inVertA * 3 + 1] - inVerts[inVertB * 3 + 1]) * s;
 			outVerts1[poly1Vert * 3 + 2] = inVerts[inVertB * 3 + 2] + (inVerts[inVertA * 3 + 2] - inVerts[inVertB * 3 + 2]) * s;
@@ -262,12 +321,12 @@ static void dividePoly(const float* inVerts, int inVertsCount,
 			
 			// add the inVertA point to the right polygon. Do NOT add points that are on the dividing line
 			// since these were already added above
-			if (inVertAxisDelta[inVertA] > 0)
+			if (deltaA > 0)
 			{
 				rcVcopy(&outVerts1[poly1Vert * 3], &inVerts[inVertA * 3]);
 				poly1Vert++;
 			}
-			else if (inVertAxisDelta[inVertA] < 0)
+			else if (deltaA < 0)
 			{
 				rcVcopy(&outVerts2[poly2Vert * 3], &inVerts[inVertA * 3]);
 				poly2Vert++;
@@ -276,18 +335,23 @@ static void dividePoly(const float* inVerts, int inVertsCount,
 		else
 		{
 			// add the inVertA point to the right polygon. Addition is done even for points on the dividing line
-			if (inVertAxisDelta[inVertA] >= 0)
+			if (deltaA >= 0)
 			{
 				rcVcopy(&outVerts1[poly1Vert * 3], &inVerts[inVertA * 3]);
 				poly1Vert++;
-				if (inVertAxisDelta[inVertA] != 0)
+				if (deltaA == 0)
 				{
-					continue;
+					rcVcopy(&outVerts2[poly2Vert * 3], &inVerts[inVertA * 3]);
+					poly2Vert++;
 				}
 			}
-			rcVcopy(&outVerts2[poly2Vert * 3], &inVerts[inVertA * 3]);
-			poly2Vert++;
+			else
+			{
+				rcVcopy(&outVerts2[poly2Vert * 3], &inVerts[inVertA * 3]);
+				poly2Vert++;
+			}
 		}
+		deltaB = deltaA;
 	}
 
 	*outVerts1Count = poly1Vert;
@@ -314,7 +378,9 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
                          const unsigned char areaID, rcHeightfield& heightfield,
                          const float* heightfieldBBMin, const float* heightfieldBBMax,
                          const float cellSize, const float inverseCellSize, const float inverseCellHeight,
-                         const int flagMergeThreshold)
+                         const int flagMergeThreshold,
+                         const int clipX0, const int clipX1,
+                         const int clipZ0, const int clipZ1)
 {
 	// Calculate the bounding box of the triangle.
 	float triBBMin[3];
@@ -358,7 +424,8 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
 	int nvRow;
 	int nvIn = 3;
 
-	for (int z = z0; z <= z1; ++z)
+	const int zEnd = rcMin(z1, clipZ1);
+	for (int z = z0; z <= zEnd; ++z)
 	{
 		// Clip polygon to row. Store the remaining polygon as well
 		const float cellZ = heightfieldBBMin[2] + (float)z * cellSize;
@@ -373,6 +440,8 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
 		{
 			continue;
 		}
+		if (z < clipZ0)
+			continue;
 		
 		// find X-axis bounds of the row
 		float minX = inRow[0];
@@ -400,7 +469,8 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
 		int nv;
 		int nv2 = nvRow;
 
-		for (int x = x0; x <= x1; ++x)
+		const int xEnd = rcMin(x1, clipX1);
+		for (int x = x0; x <= xEnd; ++x)
 		{
 			// Clip polygon to column. store the remaining polygon as well
 			const float cx = heightfieldBBMin[0] + (float)x * cellSize;
@@ -411,11 +481,10 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
 			{
 				continue;
 			}
-			if (x < 0)
+			if (x < 0 || x < clipX0)
 			{
 				continue;
 			}
-			
 			// Calculate min and max of the span.
 			float spanMin = p1[1];
 			float spanMax = p1[1];
@@ -461,6 +530,201 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
 	return true;
 }
 
+namespace
+{
+struct RasterTriRef
+{
+	const float* v[3];
+	unsigned char area;
+};
+
+const int RC_RASTER_CHUNK_SIZE = 64;
+const int RC_RASTER_MIN_BINNED_TRIS = 512;
+
+bool rasterizeTriRef(const RasterTriRef& tri, rcHeightfield& heightfield,
+					 const float inverseCellSize, const float inverseCellHeight,
+					 const int flagMergeThreshold,
+					 const int clipX0, const int clipX1,
+					 const int clipZ0, const int clipZ1)
+{
+	return rasterizeTri(tri.v[0], tri.v[1], tri.v[2], tri.area, heightfield,
+						heightfield.bmin, heightfield.bmax, heightfield.cs,
+						inverseCellSize, inverseCellHeight, flagMergeThreshold,
+						clipX0, clipX1, clipZ0, clipZ1);
+}
+
+bool rasterizeTriangleRefs(const RasterTriRef* tris, const int numTris,
+						   rcHeightfield& heightfield, const int flagMergeThreshold)
+{
+	const int w = heightfield.width;
+	const int h = heightfield.height;
+	const float inverseCellSize = 1.0f / heightfield.cs;
+	const float inverseCellHeight = 1.0f / heightfield.ch;
+
+	const int chunkCols = (w + RC_RASTER_CHUNK_SIZE - 1) / RC_RASTER_CHUNK_SIZE;
+	const int chunkRows = (h + RC_RASTER_CHUNK_SIZE - 1) / RC_RASTER_CHUNK_SIZE;
+	const int numChunks = chunkCols * chunkRows;
+	if (numTris < RC_RASTER_MIN_BINNED_TRIS || numChunks < 4 ||
+		numTris >= numChunks * 16)
+	{
+		for (int i = 0; i < numTris; ++i)
+		{
+			if (!rasterizeTriRef(tris[i], heightfield, inverseCellSize, inverseCellHeight,
+								 flagMergeThreshold, 0, w - 1, 0, h - 1))
+				return false;
+		}
+		return true;
+	}
+	int* chunkCounts = (int*)rcAlloc(sizeof(int) * numChunks, RC_ALLOC_TEMP);
+	if (!chunkCounts)
+		return false;
+	memset(chunkCounts, 0, sizeof(int) * numChunks);
+
+	int totalRefs = 0;
+	for (int i = 0; i < numTris; ++i)
+	{
+		const RasterTriRef& tri = tris[i];
+		float triBBMin[3];
+		rcVcopy(triBBMin, tri.v[0]);
+		rcVmin(triBBMin, tri.v[1]);
+		rcVmin(triBBMin, tri.v[2]);
+		float triBBMax[3];
+		rcVcopy(triBBMax, tri.v[0]);
+		rcVmax(triBBMax, tri.v[1]);
+		rcVmax(triBBMax, tri.v[2]);
+		if (!overlapBounds(triBBMin, triBBMax, heightfield.bmin, heightfield.bmax))
+			continue;
+
+		int z0 = (int)((triBBMin[2] - heightfield.bmin[2]) * inverseCellSize);
+		int z1 = (int)((triBBMax[2] - heightfield.bmin[2]) * inverseCellSize);
+		z0 = rcClamp(z0, 0, h - 1);
+		z1 = rcClamp(z1, 0, h - 1);
+		int x0 = (int)((triBBMin[0] - heightfield.bmin[0]) * inverseCellSize);
+		int x1 = (int)((triBBMax[0] - heightfield.bmin[0]) * inverseCellSize);
+		x0 = rcClamp(x0, 0, w - 1);
+		x1 = rcClamp(x1, 0, w - 1);
+
+		const int cx0 = x0 / RC_RASTER_CHUNK_SIZE;
+		const int cx1 = x1 / RC_RASTER_CHUNK_SIZE;
+		const int cz0 = z0 / RC_RASTER_CHUNK_SIZE;
+		const int cz1 = z1 / RC_RASTER_CHUNK_SIZE;
+		for (int cz = cz0; cz <= cz1; ++cz)
+		{
+			for (int cx = cx0; cx <= cx1; ++cx)
+			{
+				chunkCounts[cx + cz * chunkCols]++;
+				totalRefs++;
+			}
+		}
+	}
+
+	if (totalRefs > numTris * 8)
+	{
+		rcFree(chunkCounts);
+		for (int i = 0; i < numTris; ++i)
+		{
+			if (!rasterizeTriRef(tris[i], heightfield, inverseCellSize, inverseCellHeight,
+								 flagMergeThreshold, 0, w - 1, 0, h - 1))
+				return false;
+		}
+		return true;
+	}
+
+	int* offsets = (int*)rcAlloc(sizeof(int) * numChunks, RC_ALLOC_TEMP);
+	int* cursor = (int*)rcAlloc(sizeof(int) * numChunks, RC_ALLOC_TEMP);
+	int* refs = (int*)rcAlloc(sizeof(int) * totalRefs, RC_ALLOC_TEMP);
+	if (!offsets || !cursor || (totalRefs > 0 && !refs))
+	{
+		rcFree(chunkCounts);
+		rcFree(offsets);
+		rcFree(cursor);
+		rcFree(refs);
+		return false;
+	}
+
+	int offset = 0;
+	for (int i = 0; i < numChunks; ++i)
+	{
+		offsets[i] = offset;
+		cursor[i] = offset;
+		offset += chunkCounts[i];
+	}
+	memset(chunkCounts, 0, sizeof(int) * numChunks);
+
+	for (int i = 0; i < numTris; ++i)
+	{
+		const RasterTriRef& tri = tris[i];
+		float triBBMin[3];
+		rcVcopy(triBBMin, tri.v[0]);
+		rcVmin(triBBMin, tri.v[1]);
+		rcVmin(triBBMin, tri.v[2]);
+		float triBBMax[3];
+		rcVcopy(triBBMax, tri.v[0]);
+		rcVmax(triBBMax, tri.v[1]);
+		rcVmax(triBBMax, tri.v[2]);
+		if (!overlapBounds(triBBMin, triBBMax, heightfield.bmin, heightfield.bmax))
+			continue;
+
+		int z0 = (int)((triBBMin[2] - heightfield.bmin[2]) * inverseCellSize);
+		int z1 = (int)((triBBMax[2] - heightfield.bmin[2]) * inverseCellSize);
+		z0 = rcClamp(z0, 0, h - 1);
+		z1 = rcClamp(z1, 0, h - 1);
+		int x0 = (int)((triBBMin[0] - heightfield.bmin[0]) * inverseCellSize);
+		int x1 = (int)((triBBMax[0] - heightfield.bmin[0]) * inverseCellSize);
+		x0 = rcClamp(x0, 0, w - 1);
+		x1 = rcClamp(x1, 0, w - 1);
+
+		const int cx0 = x0 / RC_RASTER_CHUNK_SIZE;
+		const int cx1 = x1 / RC_RASTER_CHUNK_SIZE;
+		const int cz0 = z0 / RC_RASTER_CHUNK_SIZE;
+		const int cz1 = z1 / RC_RASTER_CHUNK_SIZE;
+		for (int cz = cz0; cz <= cz1; ++cz)
+		{
+			for (int cx = cx0; cx <= cx1; ++cx)
+			{
+				const int chunkIndex = cx + cz * chunkCols;
+				refs[cursor[chunkIndex]++] = i;
+			}
+		}
+	}
+
+	for (int cz = 0; cz < chunkRows; ++cz)
+	{
+		const int clipZ0 = cz * RC_RASTER_CHUNK_SIZE;
+		const int clipZ1 = rcMin(clipZ0 + RC_RASTER_CHUNK_SIZE - 1, h - 1);
+		for (int cx = 0; cx < chunkCols; ++cx)
+		{
+			const int chunkIndex = cx + cz * chunkCols;
+			const int count = cursor[chunkIndex] - offsets[chunkIndex];
+			if (count == 0)
+				continue;
+
+			const int clipX0 = cx * RC_RASTER_CHUNK_SIZE;
+			const int clipX1 = rcMin(clipX0 + RC_RASTER_CHUNK_SIZE - 1, w - 1);
+			for (int i = 0; i < count; ++i)
+			{
+				const RasterTriRef& tri = tris[refs[offsets[chunkIndex] + i]];
+				if (!rasterizeTriRef(tri, heightfield, inverseCellSize, inverseCellHeight,
+									 flagMergeThreshold, clipX0, clipX1, clipZ0, clipZ1))
+				{
+					rcFree(chunkCounts);
+					rcFree(offsets);
+					rcFree(cursor);
+					rcFree(refs);
+					return false;
+				}
+			}
+		}
+	}
+
+	rcFree(chunkCounts);
+	rcFree(offsets);
+	rcFree(cursor);
+	rcFree(refs);
+	return true;
+}
+}  // namespace
+
 bool rcRasterizeTriangle(rcContext* context,
                          const float* v0, const float* v1, const float* v2,
                          const unsigned char areaID, rcHeightfield& heightfield, const int flagMergeThreshold)
@@ -472,7 +736,9 @@ bool rcRasterizeTriangle(rcContext* context,
 	// Rasterize the single triangle.
 	const float inverseCellSize = 1.0f / heightfield.cs;
 	const float inverseCellHeight = 1.0f / heightfield.ch;
-	if (!rasterizeTri(v0, v1, v2, areaID, heightfield, heightfield.bmin, heightfield.bmax, heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold))
+	if (!rasterizeTri(v0, v1, v2, areaID, heightfield, heightfield.bmin, heightfield.bmax,
+					  heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold,
+					  0, heightfield.width - 1, 0, heightfield.height - 1))
 	{
 		context->log(RC_LOG_ERROR, "rcRasterizeTriangle: Out of memory.");
 		return false;
@@ -491,18 +757,29 @@ bool rcRasterizeTriangles(rcContext* context,
 	rcScopedTimer timer(context, RC_TIMER_RASTERIZE_TRIANGLES);
 	
 	// Rasterize the triangles.
-	const float inverseCellSize = 1.0f / heightfield.cs;
-	const float inverseCellHeight = 1.0f / heightfield.ch;
-	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	RasterTriRef* refs = NULL;
+	if (numTris > 0)
 	{
-		const float* v0 = &verts[tris[triIndex * 3 + 0] * 3];
-		const float* v1 = &verts[tris[triIndex * 3 + 1] * 3];
-		const float* v2 = &verts[tris[triIndex * 3 + 2] * 3];
-		if (!rasterizeTri(v0, v1, v2, triAreaIDs[triIndex], heightfield, heightfield.bmin, heightfield.bmax, heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold))
+		refs = (RasterTriRef*)rcAlloc(sizeof(RasterTriRef) * numTris, RC_ALLOC_TEMP);
+		if (!refs)
 		{
-			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory 'refs' (%d).", numTris);
 			return false;
 		}
+	}
+	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	{
+		refs[triIndex].v[0] = &verts[tris[triIndex * 3 + 0] * 3];
+		refs[triIndex].v[1] = &verts[tris[triIndex * 3 + 1] * 3];
+		refs[triIndex].v[2] = &verts[tris[triIndex * 3 + 2] * 3];
+		refs[triIndex].area = triAreaIDs[triIndex];
+	}
+	const bool ok = rasterizeTriangleRefs(refs, numTris, heightfield, flagMergeThreshold);
+	rcFree(refs);
+	if (!ok)
+	{
+		context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+		return false;
 	}
 
 	return true;
@@ -518,18 +795,29 @@ bool rcRasterizeTriangles(rcContext* context,
 	rcScopedTimer timer(context, RC_TIMER_RASTERIZE_TRIANGLES);
 
 	// Rasterize the triangles.
-	const float inverseCellSize = 1.0f / heightfield.cs;
-	const float inverseCellHeight = 1.0f / heightfield.ch;
-	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	RasterTriRef* refs = NULL;
+	if (numTris > 0)
 	{
-		const float* v0 = &verts[tris[triIndex * 3 + 0] * 3];
-		const float* v1 = &verts[tris[triIndex * 3 + 1] * 3];
-		const float* v2 = &verts[tris[triIndex * 3 + 2] * 3];
-		if (!rasterizeTri(v0, v1, v2, triAreaIDs[triIndex], heightfield, heightfield.bmin, heightfield.bmax, heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold))
+		refs = (RasterTriRef*)rcAlloc(sizeof(RasterTriRef) * numTris, RC_ALLOC_TEMP);
+		if (!refs)
 		{
-			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory 'refs' (%d).", numTris);
 			return false;
 		}
+	}
+	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	{
+		refs[triIndex].v[0] = &verts[tris[triIndex * 3 + 0] * 3];
+		refs[triIndex].v[1] = &verts[tris[triIndex * 3 + 1] * 3];
+		refs[triIndex].v[2] = &verts[tris[triIndex * 3 + 2] * 3];
+		refs[triIndex].area = triAreaIDs[triIndex];
+	}
+	const bool ok = rasterizeTriangleRefs(refs, numTris, heightfield, flagMergeThreshold);
+	rcFree(refs);
+	if (!ok)
+	{
+		context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+		return false;
 	}
 
 	return true;
@@ -544,18 +832,29 @@ bool rcRasterizeTriangles(rcContext* context,
 	rcScopedTimer timer(context, RC_TIMER_RASTERIZE_TRIANGLES);
 	
 	// Rasterize the triangles.
-	const float inverseCellSize = 1.0f / heightfield.cs;
-	const float inverseCellHeight = 1.0f / heightfield.ch;
-	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	RasterTriRef* refs = NULL;
+	if (numTris > 0)
 	{
-		const float* v0 = &verts[(triIndex * 3 + 0) * 3];
-		const float* v1 = &verts[(triIndex * 3 + 1) * 3];
-		const float* v2 = &verts[(triIndex * 3 + 2) * 3];
-		if (!rasterizeTri(v0, v1, v2, triAreaIDs[triIndex], heightfield, heightfield.bmin, heightfield.bmax, heightfield.cs, inverseCellSize, inverseCellHeight, flagMergeThreshold))
+		refs = (RasterTriRef*)rcAlloc(sizeof(RasterTriRef) * numTris, RC_ALLOC_TEMP);
+		if (!refs)
 		{
-			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+			context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory 'refs' (%d).", numTris);
 			return false;
 		}
+	}
+	for (int triIndex = 0; triIndex < numTris; ++triIndex)
+	{
+		refs[triIndex].v[0] = &verts[(triIndex * 3 + 0) * 3];
+		refs[triIndex].v[1] = &verts[(triIndex * 3 + 1) * 3];
+		refs[triIndex].v[2] = &verts[(triIndex * 3 + 2) * 3];
+		refs[triIndex].area = triAreaIDs[triIndex];
+	}
+	const bool ok = rasterizeTriangleRefs(refs, numTris, heightfield, flagMergeThreshold);
+	rcFree(refs);
+	if (!ok)
+	{
+		context->log(RC_LOG_ERROR, "rcRasterizeTriangles: Out of memory.");
+		return false;
 	}
 
 	return true;
